@@ -3,7 +3,7 @@ import uuid
 
 os.environ.setdefault(
     "DATABASE_URL",
-    "postgresql+psycopg://taxdocs:taxdocs@localhost:5432/taxdocs_test",
+    "postgresql+psycopg://reconcilio:reconcilio@localhost:5432/reconcilio_test",
 )
 os.environ.setdefault("JWT_SECRET", "test-secret-at-least-32-bytes-long-value")
 

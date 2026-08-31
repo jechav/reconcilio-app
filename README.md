@@ -1,4 +1,4 @@
-# TaxDocs
+# Reconcilio
 
 ## Run the stack
 
@@ -23,7 +23,7 @@ uv run alembic revision -m "..." # create a new migration
 
 ## Backend tests
 
-Requires a Postgres instance reachable via `DATABASE_URL` (defaults to `postgresql+psycopg://taxdocs:taxdocs@localhost:5432/taxdocs_test`):
+Requires a Postgres instance reachable via `DATABASE_URL` (defaults to `postgresql+psycopg://reconcilio:reconcilio@localhost:5432/reconcilio_test`):
 
 ```bash
 cd backend

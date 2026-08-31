@@ -6,13 +6,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    database_url: str = "postgresql+psycopg://taxdocs:taxdocs@localhost:5432/taxdocs"
+    database_url: str = "postgresql+psycopg://reconcilio:reconcilio@localhost:5432/reconcilio"
     redis_url: str = "redis://localhost:6379/0"
 
     minio_endpoint: str = "localhost:9000"
     minio_access_key: str = "minioadmin"
     minio_secret_key: str = "minioadmin"
-    minio_bucket: str = "taxdocs"
+    minio_bucket: str = "reconcilio"
     minio_secure: bool = False
 
     jwt_secret: str = "change-me-in-.env"

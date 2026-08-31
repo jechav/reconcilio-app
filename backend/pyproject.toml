@@ -1,7 +1,7 @@
 [project]
 name = "reconcilio-backend"
 version = "0.1.0"
-description = "TaxDocs API and worker"
+description = "Reconcilio API and worker"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",

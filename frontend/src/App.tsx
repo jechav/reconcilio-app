@@ -8,7 +8,7 @@ export function App() {
   return (
     <div>
       <nav>
-        <Link to="/">TaxDocs</Link>
+        <Link to="/">Reconcilio</Link>
         <Link to="/login">Log in</Link>
         <Link to="/signup">Sign up</Link>
       </nav>

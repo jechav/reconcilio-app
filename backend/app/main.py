@@ -6,7 +6,7 @@ from app.routers import auth, health, orgs
 
 settings = get_settings()
 
-app = FastAPI(title="TaxDocs API")
+app = FastAPI(title="Reconcilio API")
 
 app.add_middleware(
     CORSMiddleware,

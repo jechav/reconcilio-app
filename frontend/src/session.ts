@@ -1,6 +1,6 @@
 import type { TokenResponse } from "./api/client";
 
-const STORAGE_KEY = "taxdocs.session";
+const STORAGE_KEY = "reconcilio.session";
 
 export function saveSession(session: TokenResponse): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(session));

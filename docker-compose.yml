@@ -2,15 +2,15 @@ services:
   postgres:
     image: pgvector/pgvector:pg16
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-taxdocs}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-taxdocs}
-      POSTGRES_DB: ${POSTGRES_DB:-taxdocs}
+      POSTGRES_USER: ${POSTGRES_USER:-reconcilio}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-reconcilio}
+      POSTGRES_DB: ${POSTGRES_DB:-reconcilio}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-taxdocs}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-reconcilio}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -47,7 +47,7 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://taxdocs:taxdocs@postgres:5432/taxdocs}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://reconcilio:reconcilio@postgres:5432/reconcilio}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
     ports:
       - "8000:8000"
@@ -65,7 +65,7 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://taxdocs:taxdocs@postgres:5432/taxdocs}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://reconcilio:reconcilio@postgres:5432/reconcilio}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
     depends_on:
       postgres:
