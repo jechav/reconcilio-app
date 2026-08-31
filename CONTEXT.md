@@ -1,4 +1,4 @@
-# TaxDocs
+# Reconcilio
 
 AI-assisted document processing for income tax prep: extracts, categorizes, and reconciles invoices, receipts, and bank statements for small business owners / self-employed tenants.
 
