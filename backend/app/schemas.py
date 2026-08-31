@@ -1,0 +1,58 @@
+import uuid
+from datetime import datetime
+
+from pydantic import BaseModel, EmailStr, Field
+
+from app.models import OrgRole
+
+
+class SignupRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8)
+    org_name: str = Field(min_length=1, max_length=255)
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class AcceptInviteRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8)
+
+
+class InviteRequest(BaseModel):
+    email: EmailStr
+    role: OrgRole
+
+
+class OrganizationOut(BaseModel):
+    id: uuid.UUID
+    name: str
+
+    model_config = {"from_attributes": True}
+
+
+class UserOut(BaseModel):
+    id: uuid.UUID
+    email: str
+
+    model_config = {"from_attributes": True}
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserOut
+    organization: OrganizationOut
+    role: OrgRole
+
+
+class MembershipOut(BaseModel):
+    id: uuid.UUID
+    user: UserOut
+    role: OrgRole
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
