@@ -93,8 +93,15 @@ are given in your prompt — you do not need to re-derive them.
    and any relevant `docs/adr/*.md` at the repo root, so implementation
    uses the established vocabulary.
 
-4. **Implement**: invoke `/implement` with the normalized spec as the task.
-   Let it run its own TDD/typecheck/test/code-review/commit cycle.
+4. **Implement**: follow `/implement`'s practices directly rather than
+   invoking it as a skill — `/implement` has `disable-model-invocation:
+   true`, so it refuses non-interactive invocation and there is no human
+   here to run it themselves. Concretely: use TDD where it fits at
+   pre-agreed seams, run typechecking and single test files regularly as
+   you go, run the full test suite once near the end, review your own
+   diff critically before calling it done (the same bar `/code-review`
+   would apply), and commit to your branch as you go rather than in one
+   final commit.
 
 5. **Validate** (this is Ralph's own gate — there is no CI in this repo):
    ```bash
