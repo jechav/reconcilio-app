@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
+from app.celery_app import celery_app
 from app.config import get_settings
 from app.database import Base, get_db
 from app.main import app
@@ -19,6 +20,9 @@ from app.main import app
 settings = get_settings()
 engine = create_engine(settings.database_url)
 TestSessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+# Run Celery tasks synchronously in-process during tests -- no worker needed.
+celery_app.conf.update(task_always_eager=True, task_eager_propagates=True)
 
 
 @pytest.fixture(scope="session", autouse=True)
