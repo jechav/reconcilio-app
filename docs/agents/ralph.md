@@ -1,10 +1,16 @@
 # Ralph: automated ticket execution
 
 Ralph is an on-demand loop, invoked via `/ralph`, that picks up `ready-for-agent`
-issues, implements them in an isolated git worktree using `/implement`,
-validates the result, and opens a linked pull request — stacking PRs when a
-ticket depends on another that's still in flight. It follows the "Ralph
-Wiggum" methodology: a simple, repeatable loop rather than a smart planner.
+issues, implements them in an isolated git worktree, validates the result,
+and opens a linked pull request — stacking PRs when a ticket depends on
+another that's still in flight. It follows the "Ralph Wiggum" methodology: a
+simple, repeatable loop rather than a smart planner.
+
+The per-ticket executor follows `/implement`'s *practices* (TDD at natural
+seams, regular typechecking, a full test-suite run, self-review, incremental
+commits) rather than invoking `/implement` as a skill — `/implement` has
+`disable-model-invocation: true` and refuses non-interactive invocation, and
+there is no human present in a Ralph run to invoke it themselves.
 
 Each `/ralph` invocation does exactly one discovery-and-dispatch tick against
 live GitHub state. It is **not** scheduled or backgrounded — a human runs it
@@ -132,6 +138,13 @@ Ralph's orchestrator checks this precondition up front and aborts with a
 clear message if it's unreachable — it does not start or stop shared infra
 itself, since doing so from inside a per-ticket executor would itself be a
 concurrency hazard.
+
+The `reconcilio`/`reconcilio` credentials above are the `docker-compose.yml`
+defaults, but a long-running local Postgres container can carry different
+actual credentials (e.g. a container started before this repo was renamed
+from TaxDocs still answering to `taxdocs`/`taxdocs`). If the recipe above
+fails to connect, check what the running container actually accepts before
+assuming the database is down.
 
 ## Failure handling and requeue
 
