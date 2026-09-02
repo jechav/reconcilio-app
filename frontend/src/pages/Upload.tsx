@@ -14,7 +14,9 @@ import {
 import { getSession } from "../session";
 
 const POLL_INTERVAL_MS = 1500;
-const TERMINAL_STATUSES = new Set(["done", "failed"]);
+// needs_review is terminal for the pipeline: extraction finished, but a
+// human has to clear at least one Transaction before the Document is done.
+const TERMINAL_STATUSES = new Set(["done", "needs_review", "failed"]);
 
 export function Upload() {
   const session = getSession();
