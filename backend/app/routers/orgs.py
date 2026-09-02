@@ -4,11 +4,29 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.deps import Principal, get_current_principal, require_role
-from app.models import OrgMembership, OrgRole, User
-from app.schemas import InviteRequest, MembershipOut
+from app.models import OrgMembership, OrgRole, Organization, User
+from app.schemas import InviteRequest, MembershipOut, OrganizationOut, OrgSettingsUpdate
 from app.scoping import org_scoped_select
 
 router = APIRouter(prefix="/orgs/me", tags=["organizations"])
+
+
+@router.patch("/settings", response_model=OrganizationOut)
+def update_settings(
+    payload: OrgSettingsUpdate,
+    principal: Principal = Depends(require_role(OrgRole.owner)),
+    db: Session = Depends(get_db),
+) -> Organization:
+    """Owner-only: set the Organization's extraction confidence threshold
+    (issue #3, AC4) -- fields below this are sent through llm_refine."""
+    organization = db.get(Organization, principal.org_id)
+    if organization is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Organization not found")
+
+    organization.confidence_threshold = payload.confidence_threshold
+    db.commit()
+    db.refresh(organization)
+    return organization
 
 
 @router.get("/members", response_model=list[MembershipOut])

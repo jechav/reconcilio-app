@@ -1,3 +1,8 @@
+import httpx
+
+from app.extraction.textract import ExtractedField, TextractExpenseResult
+
+
 def _signup(client, email, org_name="Acme Tax"):
     response = client.post(
         "/auth/signup",
@@ -55,28 +60,53 @@ def test_request_upload_rejects_unsupported_extension_before_queueing(client, un
     assert "Unsupported file type" in response.json()["detail"]
 
 
-def test_complete_upload_queues_pipeline_and_document_reaches_done(client, unique_email):
+class _FakeTextractClient:
+    """Stands in for AWS Textract in HTTP-level tests -- no live credentials
+    are available in this environment (issue #3)."""
+
+    def detect_text(self, document_bytes: bytes) -> list[str]:
+        return ["INVOICE", "Vendor Co", "TOTAL", "Bill To"]
+
+    def analyze_expense(self, document_bytes: bytes) -> TextractExpenseResult:
+        return TextractExpenseResult(
+            fields=[
+                ExtractedField(name="vendor", value="Vendor Co", confidence=0.95),
+                ExtractedField(name="amount", value="123.45", confidence=0.95),
+                ExtractedField(name="invoice_date", value="2026-01-01", confidence=0.95),
+            ]
+        )
+
+
+def _upload_and_complete(client, headers, monkeypatch, document_id, upload_url):
+    monkeypatch.setattr("app.pipeline.get_textract_client", lambda: _FakeTextractClient())
+    httpx.put(upload_url, content=b"%PDF-1.4 fake invoice bytes for testing").raise_for_status()
+    return client.post(f"/documents/{document_id}/complete", headers=headers)
+
+
+def test_complete_upload_queues_pipeline_and_document_reaches_done(client, unique_email, monkeypatch):
     owner = _signup(client, unique_email)
     headers = _auth_headers(owner["access_token"])
-    document_id = _request_upload(client, headers).json()["document"]["id"]
+    upload = _request_upload(client, headers).json()
 
-    response = client.post(f"/documents/{document_id}/complete", headers=headers)
+    response = _upload_and_complete(
+        client, headers, monkeypatch, upload["document"]["id"], upload["upload_url"]
+    )
 
     assert response.status_code == 200
-    # Celery runs eagerly in tests, so the stub pipeline has already finished.
+    # Celery runs eagerly in tests, so the pipeline has already finished.
     assert response.json()["status"] == "done"
 
-    status_response = client.get(f"/documents/{document_id}", headers=headers)
+    status_response = client.get(f"/documents/{upload['document']['id']}", headers=headers)
     assert status_response.json()["status"] == "done"
 
 
-def test_complete_upload_rejects_already_completed_document(client, unique_email):
+def test_complete_upload_rejects_already_completed_document(client, unique_email, monkeypatch):
     owner = _signup(client, unique_email)
     headers = _auth_headers(owner["access_token"])
-    document_id = _request_upload(client, headers).json()["document"]["id"]
-    client.post(f"/documents/{document_id}/complete", headers=headers)
+    upload = _request_upload(client, headers).json()
+    _upload_and_complete(client, headers, monkeypatch, upload["document"]["id"], upload["upload_url"])
 
-    response = client.post(f"/documents/{document_id}/complete", headers=headers)
+    response = client.post(f"/documents/{upload['document']['id']}/complete", headers=headers)
 
     assert response.status_code == 409
 
