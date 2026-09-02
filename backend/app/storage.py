@@ -48,6 +48,22 @@ def presigned_put_url(key: str) -> str:
     return client.presigned_put_object(settings.minio_bucket, key, expires=PRESIGNED_URL_EXPIRY)
 
 
+def get_object_bytes(key: str) -> bytes:
+    """Read one object's full contents -- the worker's way in to the file.
+
+    Uploads are capped at 20MB by validation, so reading the whole object
+    into memory is bounded and simpler than streaming.
+    """
+    settings = get_settings()
+    client = get_minio_client()
+    response = client.get_object(settings.minio_bucket, key)
+    try:
+        return bytes(response.read())
+    finally:
+        response.close()
+        response.release_conn()
+
+
 def presigned_get_url(key: str) -> str:
     """A short-lived (never long-lived/public) URL for reading one object."""
     settings = get_settings()
