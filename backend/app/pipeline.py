@@ -147,7 +147,9 @@ def default_deps() -> PipelineDeps:
     )
     return PipelineDeps(
         fetch_bytes=get_object_bytes,
-        textract=textract_module.AwsTextractClient(region_name=settings.aws_region),
+        textract=textract_module.AwsTextractClient(
+            region_name=settings.aws_region, bucket=settings.minio_bucket
+        ),
         refiner=refiner,
         llm_client=get_llm_client(),
         classifier=classifier,
@@ -177,7 +179,11 @@ def _build_graph(
     def classify(state: PipelineState) -> PipelineState:
         if document.doc_type == DocumentType.invoice_or_receipt:
             data = deps.fetch_bytes(document.minio_key)
-            raw_lines = deps.textract.detect_text(data)
+            raw_lines = (
+                deps.textract.detect_text_async(document.minio_key)
+                if textract_module.requires_async(data)
+                else deps.textract.detect_text(data)
+            )
             detected = detect_document_type(raw_lines)
             if detected != DocumentType.invoice_or_receipt:
                 return {**state, "path": UNKNOWN_PATH}
@@ -209,7 +215,11 @@ def _build_graph(
 
     def ocr_extract(state: PipelineState) -> PipelineState:
         data = deps.fetch_bytes(document.minio_key)
-        response = deps.textract.analyze_document(data)
+        response = (
+            deps.textract.analyze_document_async(document.minio_key)
+            if textract_module.requires_async(data)
+            else deps.textract.analyze_document(data)
+        )
         lines = textract_module.parse_textract_tables(response)
         if not lines:
             raise ExtractionFailed("Textract found no statement table in the document")
@@ -231,7 +241,11 @@ def _build_graph(
 
     def invoice_ocr_extract(state: PipelineState) -> PipelineState:
         document_bytes = state["document_bytes"]
-        result = deps.textract.analyze_expense(document_bytes)
+        result = (
+            deps.textract.analyze_expense_async(document.minio_key)
+            if textract_module.requires_async(document_bytes)
+            else deps.textract.analyze_expense(document_bytes)
+        )
         found = {field.name: field for field in result.fields}
         fields: dict[str, ExtractedField] = {}
         for name in FIELD_NAMES:
