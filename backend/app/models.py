@@ -160,6 +160,43 @@ class Document(Base):
     )
 
 
+#: Seeded onto every new Organization at signup (issue #5, AC1). Flat, no
+#: built-in tax logic -- see CONTEXT.md, Category.
+STARTER_CATEGORY_NAMES: list[str] = [
+    "Travel",
+    "Meals",
+    "Supplies",
+    "Software",
+    "Professional Services",
+    "Utilities",
+    "Rent",
+    "Other",
+]
+
+
+class Category(Base):
+    """A flat, tenant-defined label a Transaction is assigned to.
+
+    Owner/admin can create, edit, and delete Categories, including the
+    seeded starter set (issue #5, AC2). Deleting a Category never touches
+    the Transactions it was assigned to except to un-set that one
+    reference -- see routers/categories.py.
+    """
+
+    __tablename__ = "categories"
+    __table_args__ = (UniqueConstraint("org_id", "name", name="uq_categories_org_name"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now, nullable=False
+    )
+
+
 class Transaction(Base):
     """One normalized line item extracted from a Document.
 
@@ -168,6 +205,14 @@ class Transaction(Base):
     the invoice date (issue #3). A bank statement yields one per statement
     line, in order (issue #4). Amount sign carries direction: negative is
     money out, positive money in.
+
+    `category_id`/`category_confidence` hold the current Category
+    assignment -- exactly one per Transaction (issue #5, AC3), either the
+    pipeline's LLM suggestion or a user's correction (`category_confidence`
+    1.0 for a correction, since it is authoritative). `category_id` is
+    nullable only because a Category can be deleted out from under a
+    Transaction (routers/categories.py) or an Organization can have no
+    Categories at all to suggest from.
     """
 
     __tablename__ = "transactions"
@@ -190,6 +235,10 @@ class Transaction(Base):
     status: Mapped[TransactionStatus] = mapped_column(
         Enum(TransactionStatus, name="transaction_status"), nullable=False
     )
+    category_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("categories.id"), nullable=True
+    )
+    category_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now, nullable=False
@@ -199,6 +248,33 @@ class Transaction(Base):
     extraction_results: Mapped[list["ExtractionResult"]] = relationship(
         back_populates="transaction", cascade="all, delete-orphan"
     )
+    category: Mapped["Category | None"] = relationship()
+
+
+class CategoryCorrection(Base):
+    """A snapshot of one user correction, kept as org-scoped few-shot context.
+
+    Insert-only: never updated or deleted, and read-only for suggestion
+    purposes -- reading past corrections to inform a *new* Transaction's
+    suggestion never touches any other Transaction's Category (issue #5,
+    AC6). Scoped strictly by `org_id`, matching CONTEXT.md's Organization as
+    the tenant boundary.
+    """
+
+    __tablename__ = "category_corrections"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False, index=True
+    )
+    transaction_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("transactions.id"), nullable=False
+    )
+    description: Mapped[str] = mapped_column(String(512), nullable=False)
+    category_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("categories.id"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
 
 
 class ExtractionResult(Base):
