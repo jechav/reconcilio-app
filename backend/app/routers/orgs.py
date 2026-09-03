@@ -4,8 +4,9 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.deps import Principal, get_current_principal, require_role
+from app.llm_usage import usage_summary
 from app.models import OrgMembership, OrgRole, Organization, User
-from app.schemas import InviteRequest, MembershipOut, OrganizationOut, OrgSettingsUpdate
+from app.schemas import InviteRequest, LlmUsageOut, MembershipOut, OrganizationOut, OrgSettingsUpdate
 from app.scoping import org_scoped_select
 
 router = APIRouter(prefix="/orgs/me", tags=["organizations"])
@@ -27,6 +28,19 @@ def update_settings(
     db.commit()
     db.refresh(organization)
     return organization
+
+
+@router.get("/llm-usage", response_model=list[LlmUsageOut])
+def get_llm_usage(
+    principal: Principal = Depends(get_current_principal),
+    db: Session = Depends(get_db),
+) -> list[LlmUsageOut]:
+    """Per-tenant LLM usage/cost tracking, queryable (issue #7, AC5):
+    total calls per provider/model for the calling Organization."""
+    return [
+        LlmUsageOut(provider=total.provider, model=total.model, calls=total.calls)
+        for total in usage_summary(db, principal.org_id)
+    ]
 
 
 @router.get("/members", response_model=list[MembershipOut])
