@@ -7,6 +7,7 @@ from app.routers import (
     audit,
     auth,
     categories,
+    chat,
     dashboard,
     documents,
     export,
@@ -40,3 +41,4 @@ app.include_router(transactions.router)
 app.include_router(dashboard.router)
 app.include_router(export.router)
 app.include_router(audit.router)
+app.include_router(chat.router)

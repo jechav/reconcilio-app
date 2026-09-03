@@ -4,7 +4,15 @@ from decimal import Decimal
 
 from pydantic import BaseModel, EmailStr, Field
 
-from app.models import DocumentStatus, DocumentType, ExtractionMethod, MatchType, OrgRole, TransactionStatus
+from app.models import (
+    ChatRole,
+    DocumentStatus,
+    DocumentType,
+    ExtractionMethod,
+    MatchType,
+    OrgRole,
+    TransactionStatus,
+)
 
 
 class SignupRequest(BaseModel):
@@ -249,3 +257,36 @@ class TransactionExportRow(BaseModel):
     match_status: str
 
     model_config = {"from_attributes": True}
+
+
+class ChatSessionOut(BaseModel):
+    id: uuid.UUID
+    user_id: uuid.UUID
+    title: str | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ChatCitationOut(BaseModel):
+    """One Document/Transaction the agent's answer drew on (issue #11, AC5)."""
+
+    source_type: str
+    source_id: uuid.UUID
+    document_id: uuid.UUID
+    transaction_id: uuid.UUID | None
+
+
+class ChatMessageOut(BaseModel):
+    id: uuid.UUID
+    session_id: uuid.UUID
+    role: ChatRole
+    content: str
+    citations: list[ChatCitationOut]
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ChatMessageCreate(BaseModel):
+    content: str = Field(min_length=1, max_length=4000)
