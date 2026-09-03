@@ -4,7 +4,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel, EmailStr, Field
 
-from app.models import DocumentStatus, DocumentType, ExtractionMethod, OrgRole, TransactionStatus
+from app.models import DocumentStatus, DocumentType, ExtractionMethod, MatchType, OrgRole, TransactionStatus
 
 
 class SignupRequest(BaseModel):
@@ -112,3 +112,20 @@ class TransactionOut(BaseModel):
     status: TransactionStatus
 
     model_config = {"from_attributes": True}
+
+
+class ReconciliationMatchOut(BaseModel):
+    id: uuid.UUID
+    bank_transaction_id: uuid.UUID
+    expense_transaction_id: uuid.UUID
+    match_type: MatchType
+    confidence: float
+    actor: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ManualMatchRequest(BaseModel):
+    bank_transaction_id: uuid.UUID
+    expense_transaction_id: uuid.UUID
