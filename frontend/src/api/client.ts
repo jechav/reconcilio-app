@@ -130,3 +130,73 @@ export function completeDocumentUpload(token: string, documentId: string): Promi
 export function getDocument(token: string, documentId: string): Promise<DocumentOut> {
   return getJson<DocumentOut>(`/documents/${documentId}`, token);
 }
+
+export type TransactionStatus = "needs_review" | "resolved";
+
+export interface TransactionOut {
+  id: string;
+  document_id: string;
+  line_number: number;
+  description: string;
+  amount: string;
+  txn_date: string;
+  confidence: number;
+  status: TransactionStatus;
+  category_id: string | null;
+  category_confidence: number | null;
+}
+
+export interface CategorySummaryOut {
+  category_id: string | null;
+  category_name: string;
+  income: string;
+  expenses: string;
+  transaction_count: number;
+}
+
+export interface DashboardSummaryOut {
+  start_date: string;
+  end_date: string;
+  income_total: string;
+  expenses_total: string;
+  net_total: string;
+  categories: CategorySummaryOut[];
+}
+
+export interface DashboardFlagsOut {
+  start_date: string;
+  end_date: string;
+  unmatched_bank_transactions: TransactionOut[];
+  unmatched_expense_transactions: TransactionOut[];
+}
+
+export function getDashboardSummary(
+  token: string,
+  startDate: string,
+  endDate: string,
+): Promise<DashboardSummaryOut> {
+  const params = new URLSearchParams({ start_date: startDate, end_date: endDate });
+  return getJson<DashboardSummaryOut>(`/dashboard/summary?${params.toString()}`, token);
+}
+
+export function getDashboardSummaryTransactions(
+  token: string,
+  startDate: string,
+  endDate: string,
+  categoryId: string | null,
+): Promise<TransactionOut[]> {
+  const params = new URLSearchParams({ start_date: startDate, end_date: endDate });
+  if (categoryId) {
+    params.set("category_id", categoryId);
+  }
+  return getJson<TransactionOut[]>(`/dashboard/summary/transactions?${params.toString()}`, token);
+}
+
+export function getDashboardFlags(
+  token: string,
+  startDate: string,
+  endDate: string,
+): Promise<DashboardFlagsOut> {
+  const params = new URLSearchParams({ start_date: startDate, end_date: endDate });
+  return getJson<DashboardFlagsOut>(`/dashboard/flags?${params.toString()}`, token);
+}

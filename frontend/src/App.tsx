@@ -1,5 +1,6 @@
 import { Link, Route, Routes } from "react-router-dom";
 
+import { Dashboard } from "./pages/Dashboard";
 import { Home } from "./pages/Home";
 import { Login } from "./pages/Login";
 import { Signup } from "./pages/Signup";
@@ -13,12 +14,14 @@ export function App() {
         <Link to="/login">Log in</Link>
         <Link to="/signup">Sign up</Link>
         <Link to="/upload">Upload</Link>
+        <Link to="/dashboard">Dashboard</Link>
       </nav>
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/login" element={<Login />} />
         <Route path="/signup" element={<Signup />} />
         <Route path="/upload" element={<Upload />} />
+        <Route path="/dashboard" element={<Dashboard />} />
       </Routes>
     </div>
   );
