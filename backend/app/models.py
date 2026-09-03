@@ -14,12 +14,15 @@ from sqlalchemy import (
     ForeignKey,
     Numeric,
     String,
+    Text,
     UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from pgvector.sqlalchemy import Vector
 
 from app.database import Base
+from app.extraction.embed import EMBEDDING_DIMENSIONS
 
 
 def _uuid() -> uuid.UUID:
@@ -427,6 +430,124 @@ class DeadLetterTask(Base):
     error: Mapped[str] = mapped_column(String(2000), nullable=False)
     attempts: Mapped[int] = mapped_column(BigInteger, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+
+
+class EmbeddingSourceType(str, enum.Enum):
+    """What an `Embedding` row was generated from -- see CONTEXT.md,
+    Document and Transaction. A `document` embedding summarizes everything
+    extracted from one Document (its filename plus every Transaction
+    description persisted from it); a `transaction` embedding covers one
+    Transaction's own content. Both are searched together by the chat
+    agent's vector-search tool (issue #11)."""
+
+    document = "document"
+    transaction = "transaction"
+
+
+class Embedding(Base):
+    """A pgvector embedding of Document/Transaction text, for the RAG chat
+    agent's vector-search tool (issue #11).
+
+    Always org-scoped (`org_id`) so a similarity search can never surface
+    another Organization's data -- see app/scoping.py. `document_id` is set
+    on every row (a Transaction always belongs to a Document); `transaction_id`
+    is set only for `source_type == transaction`. `content` is the exact text
+    that was embedded, kept alongside the vector so the chat agent can quote
+    it in a citation even before re-fetching the source row. `vector` is
+    nullable: when no LLM is configured, `NullEmbeddingClient` (see
+    app/extraction/embed.py) still lets this row get created (uniform
+    pipeline shape) but leaves `vector` unset, and the vector-search tool
+    excludes such rows from its similarity query -- see llm.NullRefiner for
+    the same "never fabricate, degrade visibly" posture.
+    """
+
+    __tablename__ = "embeddings"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_type", "source_id", name="uq_embeddings_source_type_source_id"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False, index=True
+    )
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("documents.id"), nullable=False, index=True
+    )
+    transaction_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("transactions.id"), nullable=True
+    )
+    source_type: Mapped[EmbeddingSourceType] = mapped_column(
+        Enum(EmbeddingSourceType, name="embedding_source_type"), nullable=False
+    )
+    #: Equal to `document_id` for a document embedding, `transaction_id` for
+    #: a transaction embedding -- the unique key of what this row embeds.
+    source_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    vector: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIMENSIONS), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now, nullable=False
+    )
+
+
+class ChatRole(str, enum.Enum):
+    user = "user"
+    assistant = "assistant"
+
+
+class ChatSession(Base):
+    """A RAG chat conversation, scoped to one Organization (issue #11).
+
+    `user_id` records who started the session (for display only -- per
+    CONTEXT.md, OrgMembership, every member has uniform visibility into all
+    of the Organization's data, so sessions are listed/read org-wide, not
+    just by their creator).
+    """
+
+    __tablename__ = "chat_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False, index=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+
+    messages: Mapped[list["ChatMessage"]] = relationship(
+        back_populates="session", cascade="all, delete-orphan", order_by="ChatMessage.created_at"
+    )
+
+
+class ChatMessage(Base):
+    """One turn of a ChatSession -- either the user's question or the
+    agent's answer (issue #11).
+
+    `citations` is a JSON list of `{"source_type": ..., "source_id": ...,
+    "document_id": ..., "transaction_id": ...}` objects naming the exact
+    Documents/Transactions the answer drew on -- empty on a `user` message,
+    and on an `assistant` message only ever referencing rows the agent's
+    tools actually returned (themselves already org-scoped), so a citation
+    can never point at another Organization's data.
+    """
+
+    __tablename__ = "chat_messages"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False, index=True
+    )
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("chat_sessions.id"), nullable=False, index=True
+    )
+    role: Mapped[ChatRole] = mapped_column(Enum(ChatRole, name="chat_role"), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    citations: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+
+    session: Mapped["ChatSession"] = relationship(back_populates="messages")
 
 
 SYSTEM_ACTOR = "system"

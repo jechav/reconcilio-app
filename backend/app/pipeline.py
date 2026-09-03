@@ -46,6 +46,7 @@ from app.extraction.categorize import (
     OpenRouterCategoryClassifier,
 )
 from app.extraction.classify import detect_document_type
+from app.extraction.embed import EmbeddingClient, LiteLLMEmbeddingClient, NullEmbeddingClient
 from app.extraction.llm import LlmRefiner, LLMRefinementClient, NullRefiner, OpenRouterRefiner, get_llm_client
 from app.extraction.textract import FIELD_NAMES, TextractClient
 from app.extraction.types import ExtractedField, ExtractedLine
@@ -59,6 +60,8 @@ from app.models import (
     Document,
     DocumentStatus,
     DocumentType,
+    Embedding,
+    EmbeddingSourceType,
     ExtractionMethod,
     ExtractionResult,
     Organization,
@@ -108,6 +111,10 @@ class PipelineDeps:
     refiner: LlmRefiner
     llm_client: LLMRefinementClient | None = None
     classifier: CategoryClassifier = field(default_factory=NullClassifier)
+    #: Generates Document/Transaction embeddings on persist for the RAG chat
+    #: agent's vector-search tool (issue #11). Defaults to NullEmbeddingClient
+    #: for tests that don't set it explicitly -- see extraction/embed.py.
+    embedding_client: EmbeddingClient = field(default_factory=NullEmbeddingClient)
 
 
 def default_deps() -> PipelineDeps:
@@ -133,12 +140,18 @@ def default_deps() -> PipelineDeps:
         if settings.openrouter_api_key
         else NullClassifier()
     )
+    embedding_client: EmbeddingClient = (
+        LiteLLMEmbeddingClient(model=settings.embedding_model)
+        if settings.openrouter_api_key
+        else NullEmbeddingClient()
+    )
     return PipelineDeps(
         fetch_bytes=get_object_bytes,
         textract=textract_module.AwsTextractClient(region_name=settings.aws_region),
         refiner=refiner,
         llm_client=get_llm_client(),
         classifier=classifier,
+        embedding_client=embedding_client,
     )
 
 
@@ -293,6 +306,7 @@ def _build_graph(
             classifier=deps.classifier,
             categories=categories,
             examples=examples,
+            embedding_client=deps.embedding_client,
         )
         return state
 
@@ -371,10 +385,12 @@ def _persist_lines(
     classifier: CategoryClassifier,
     categories: list[Category],
     examples: list[CorrectionExample],
+    embedding_client: EmbeddingClient,
 ) -> None:
     by_line_number = {line.line_number: line for line in lines}
     created: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
+    persisted_transactions: list[Transaction] = []
     category_names = [category.name for category in categories]
     category_id_by_name = {category.name: category.id for category in categories}
 
@@ -479,6 +495,7 @@ def _persist_lines(
         )
 
         created.append({"transaction_id": str(transaction.id), "line_number": transaction.line_number})
+        persisted_transactions.append(transaction)
 
     db.add(
         AuditLogEntry(
@@ -499,6 +516,99 @@ def _persist_lines(
         )
     )
     db.flush()
+
+    _persist_embeddings(
+        db=db, document=document, transactions=persisted_transactions, embedding_client=embedding_client
+    )
+    db.flush()
+
+
+def _upsert_embedding(
+    db: Session,
+    *,
+    org_id: uuid.UUID,
+    document_id: uuid.UUID,
+    transaction_id: uuid.UUID | None,
+    source_type: EmbeddingSourceType,
+    source_id: uuid.UUID,
+    content: str,
+    embedding_client: EmbeddingClient,
+) -> None:
+    """Create or refresh one Embedding row (issue #11, AC1).
+
+    Idempotent by `(source_type, source_id)` -- a document/transaction whose
+    text hasn't changed since a prior run still gets its vector recomputed
+    (cheap, and correct if the embedding model itself ever changes) rather
+    than accumulating duplicate rows, matching the persist step's existing
+    update-in-place convention for Transaction/ExtractionResult (see
+    `_persist_lines` above, issue #7 AC3/AC6).
+    """
+    existing = db.execute(
+        select(Embedding).where(
+            Embedding.source_type == source_type, Embedding.source_id == source_id
+        )
+    ).scalar_one_or_none()
+    vector = embedding_client.embed(content)
+    if existing is None:
+        db.add(
+            Embedding(
+                org_id=org_id,
+                document_id=document_id,
+                transaction_id=transaction_id,
+                source_type=source_type,
+                source_id=source_id,
+                content=content,
+                vector=vector,
+            )
+        )
+    else:
+        existing.content = content
+        existing.vector = vector
+
+
+def _persist_embeddings(
+    *,
+    db: Session,
+    document: Document,
+    transactions: list[Transaction],
+    embedding_client: EmbeddingClient,
+) -> None:
+    """Write embeddings for this Document's text and each of its persisted
+    Transactions (issue #11, AC1), so the chat agent's vector-search tool
+    (app/chat/tools.py) has something to search. No-ops write-wise when
+    `embedding_client` is a NullEmbeddingClient (no LLM configured): the rows
+    are still created/refreshed, just with `vector` left None -- see
+    extraction/embed.py.
+    """
+    for transaction in transactions:
+        content = f"{transaction.txn_date} {transaction.description} amount={transaction.amount}"
+        _upsert_embedding(
+            db,
+            org_id=document.org_id,
+            document_id=document.id,
+            transaction_id=transaction.id,
+            source_type=EmbeddingSourceType.transaction,
+            source_id=transaction.id,
+            content=content,
+            embedding_client=embedding_client,
+        )
+
+    if not transactions:
+        return
+
+    document_content = "\n".join(
+        [document.filename] + [t.description for t in transactions]
+    )
+    _upsert_embedding(
+        db,
+        org_id=document.org_id,
+        document_id=document.id,
+        transaction_id=None,
+        source_type=EmbeddingSourceType.document,
+        source_id=document.id,
+        content=document_content,
+        embedding_client=embedding_client,
+    )
 
 
 def derive_document_status(transactions: list[Transaction]) -> DocumentStatus:
