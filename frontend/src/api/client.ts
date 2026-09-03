@@ -201,6 +201,40 @@ export function getDashboardFlags(
   return getJson<DashboardFlagsOut>(`/dashboard/flags?${params.toString()}`, token);
 }
 
+export interface AuditLogEntryOut {
+  id: string;
+  entity_type: string;
+  entity_id: string;
+  actor: string;
+  actor_email: string | null;
+  action: string;
+  before: Record<string, unknown> | null;
+  after: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface AuditLogFilters {
+  entityType?: string;
+  actor?: string;
+  action?: string;
+  startDate?: string;
+  endDate?: string;
+}
+
+/** Chronological AuditLogEntry list for the caller's Organization,
+ * owner/admin only (issue #10, AC1/AC3). Every filter is optional and
+ * stacks with the others -- see backend/app/routers/audit.py. */
+export function getAuditLog(token: string, filters: AuditLogFilters = {}): Promise<AuditLogEntryOut[]> {
+  const params = new URLSearchParams();
+  if (filters.entityType) params.set("entity_type", filters.entityType);
+  if (filters.actor) params.set("actor", filters.actor);
+  if (filters.action) params.set("action", filters.action);
+  if (filters.startDate) params.set("start_date", filters.startDate);
+  if (filters.endDate) params.set("end_date", filters.endDate);
+  const query = params.toString();
+  return getJson<AuditLogEntryOut[]>(`/audit-log${query ? `?${query}` : ""}`, token);
+}
+
 export type ExportFormat = "csv" | "json";
 
 export interface ExportDownload {

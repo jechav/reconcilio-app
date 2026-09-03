@@ -201,6 +201,29 @@ class DashboardFlagsOut(BaseModel):
     unmatched_expense_transactions: list[TransactionOut]
 
 
+class AuditLogEntryOut(BaseModel):
+    """One AuditLogEntry row for the audit trail viewer (issue #10, AC1/AC2).
+
+    `actor` is the raw stored value -- the string literal `"system"` for
+    pipeline/algorithm actions, or a User id for a human-initiated one (see
+    CONTEXT.md, Manual match). `actor_email` resolves that id to the
+    acting User's email when it is one, and is `None` for `"system"` or a
+    User that no longer resolves, so the UI can show a human-readable
+    actor without a second round trip."""
+
+    id: uuid.UUID
+    entity_type: str
+    entity_id: uuid.UUID
+    actor: str
+    actor_email: str | None
+    action: str
+    before: dict[str, object] | None
+    after: dict[str, object] | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 class TransactionExportRow(BaseModel):
     """One Transaction rendered for an accountant/tax-software export
     (issue #9). Every Transaction in the selected date range is included
