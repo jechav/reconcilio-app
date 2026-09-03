@@ -7,7 +7,7 @@ keyword argument and route every query through `org_scoped_select` (see
 app/scoping.py) or an explicit `Embedding.org_id == org_id` filter, so
 neither tool can be made to return another Organization's data no matter
 what the agent asks for -- this is what issue #11's isolation acceptance
-criterion tests directly (tests/test_chat.py).
+criterion tests directly (tests/test_chat_agent.py, tests/test_chat_router.py).
 
 Both are plain functions, not classes: there is nothing here to inject or
 fake beyond the `Session` and `EmbeddingClient` already passed in, and a
