@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
 from app.logging_config import configure_logging
 from app.routers import (
+    audit,
     auth,
     categories,
     dashboard,
@@ -38,3 +39,4 @@ app.include_router(categories.router)
 app.include_router(transactions.router)
 app.include_router(dashboard.router)
 app.include_router(export.router)
+app.include_router(audit.router)
