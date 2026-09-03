@@ -110,6 +110,8 @@ class TransactionOut(BaseModel):
     txn_date: date
     confidence: float
     status: TransactionStatus
+    category_id: uuid.UUID | None
+    category_confidence: float | None
 
     model_config = {"from_attributes": True}
 
@@ -126,6 +128,26 @@ class ReconciliationMatchOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class CategoryOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 class ManualMatchRequest(BaseModel):
     bank_transaction_id: uuid.UUID
     expense_transaction_id: uuid.UUID
+
+
+class CategoryCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+
+
+class CategoryUpdateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+
+
+class TransactionCategoryCorrectionRequest(BaseModel):
+    category_id: uuid.UUID

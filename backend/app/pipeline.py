@@ -29,14 +29,21 @@ network boundaries.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, TypedDict
 
 from langgraph.graph import END, START, StateGraph
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.extraction import structured
 from app.extraction import textract as textract_module
+from app.extraction.categorize import (
+    CategoryClassifier,
+    CorrectionExample,
+    NullClassifier,
+    OpenRouterCategoryClassifier,
+)
 from app.extraction.classify import detect_document_type
 from app.extraction.llm import LlmRefiner, LLMRefinementClient, NullRefiner, OpenRouterRefiner, get_llm_client
 from app.extraction.textract import FIELD_NAMES, TextractClient
@@ -45,6 +52,8 @@ from app.extraction.validation import ValidationOutcome, validate_line, validate
 from app.models import (
     SYSTEM_ACTOR,
     AuditLogEntry,
+    Category,
+    CategoryCorrection,
     Document,
     DocumentStatus,
     DocumentType,
@@ -55,6 +64,7 @@ from app.models import (
     TransactionStatus,
 )
 from app.reconciliation import run_reconciliation_for_document
+from app.scoping import org_scoped_select
 
 OCR_PATH = "ocr"
 STRUCTURED_PATH = "structured"
@@ -77,13 +87,16 @@ class PipelineDeps:
     two different Protocols). `llm_client` is optional -- tests that only
     exercise the bank-statement paths never need to set it, and the
     invoice/receipt path degrades to "no refinement" (like `NullRefiner`)
-    when it's absent.
+    when it's absent. `classifier` suggests each persisted Transaction's
+    Category (issue #5); defaults to `NullClassifier` for tests that don't
+    set it explicitly.
     """
 
     fetch_bytes: Callable[[str], bytes]
     textract: TextractClient
     refiner: LlmRefiner
     llm_client: LLMRefinementClient | None = None
+    classifier: CategoryClassifier = field(default_factory=NullClassifier)
 
 
 def default_deps() -> PipelineDeps:
@@ -100,11 +113,21 @@ def default_deps() -> PipelineDeps:
         if settings.openrouter_api_key
         else NullRefiner()
     )
+    classifier: CategoryClassifier = (
+        OpenRouterCategoryClassifier(
+            api_key=settings.openrouter_api_key,
+            model=settings.llm_model,
+            base_url=settings.openrouter_base_url,
+        )
+        if settings.openrouter_api_key
+        else NullClassifier()
+    )
     return PipelineDeps(
         fetch_bytes=get_object_bytes,
         textract=textract_module.AwsTextractClient(region_name=settings.aws_region),
         refiner=refiner,
         llm_client=get_llm_client(),
+        classifier=classifier,
     )
 
 
@@ -117,7 +140,14 @@ class PipelineState(TypedDict, total=False):
     refined_lines: list[int]
 
 
-def _build_graph(document: Document, db: Session, deps: PipelineDeps, threshold: float) -> Any:
+def _build_graph(
+    document: Document,
+    db: Session,
+    deps: PipelineDeps,
+    threshold: float,
+    categories: list[Category],
+    examples: list[CorrectionExample],
+) -> Any:
     """Compile the graph with every node bound to one Document and its deps."""
 
     def classify(state: PipelineState) -> PipelineState:
@@ -232,8 +262,10 @@ def _build_graph(document: Document, db: Session, deps: PipelineDeps, threshold:
         return {**state, "outcomes": outcomes}
 
     def categorize(state: PipelineState) -> PipelineState:
-        # Category assignment is a later ticket; every Transaction starts
-        # uncategorized and the review UI is where a human picks one.
+        # Suggestion happens in `persist`, once each line has become a
+        # Transaction with an id to attach the suggestion (and its audit
+        # entry) to -- this node is a pass-through kept for graph shape
+        # symmetry with the other paths (issue #5).
         return state
 
     def persist(state: PipelineState) -> PipelineState:
@@ -245,6 +277,9 @@ def _build_graph(document: Document, db: Session, deps: PipelineDeps, threshold:
             refined_lines=state.get("refined_lines", []),
             threshold=threshold,
             path=state.get("path", OCR_PATH),
+            classifier=deps.classifier,
+            categories=categories,
+            examples=examples,
         )
         return state
 
@@ -306,10 +341,15 @@ def _persist_lines(
     refined_lines: list[int],
     threshold: float,
     path: str,
+    classifier: CategoryClassifier,
+    categories: list[Category],
+    examples: list[CorrectionExample],
 ) -> None:
     by_line_number = {line.line_number: line for line in lines}
     created: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
+    category_names = [category.name for category in categories]
+    category_id_by_name = {category.name: category.id for category in categories}
 
     for outcome in outcomes:
         raw = by_line_number.get(outcome.line_number)
@@ -365,6 +405,35 @@ def _persist_lines(
                 },
             )
         )
+
+        # Category suggestion (issue #5, AC3): exactly one suggested
+        # Category with a confidence score per Transaction, informed by
+        # this Organization's own past corrections only (AC5/AC6).
+        suggestion = classifier.suggest(
+            description=transaction.description,
+            amount=str(transaction.amount),
+            category_names=category_names,
+            examples=examples,
+        )
+        suggested_category_id = category_id_by_name.get(suggestion.category_name)
+        transaction.category_id = suggested_category_id
+        transaction.category_confidence = suggestion.confidence
+        db.add(
+            AuditLogEntry(
+                org_id=document.org_id,
+                actor=SYSTEM_ACTOR,
+                action="transaction.category_suggested",
+                entity_type="transaction",
+                entity_id=transaction.id,
+                before=None,
+                after={
+                    "category_id": str(suggested_category_id) if suggested_category_id else None,
+                    "category_name": suggestion.category_name,
+                    "confidence": suggestion.confidence,
+                },
+            )
+        )
+
         created.append({"transaction_id": str(transaction.id), "line_number": transaction.line_number})
 
     db.add(
@@ -401,6 +470,24 @@ def derive_document_status(transactions: list[Transaction]) -> DocumentStatus:
     return DocumentStatus.done
 
 
+def _recent_corrections(db: Session, org_id: uuid.UUID) -> list[CorrectionExample]:
+    """The Organization's most recent user corrections, as few-shot context
+    for the next Category suggestion -- org-scoped only (issue #5, AC5)."""
+    from app.extraction.categorize import FEW_SHOT_EXAMPLE_LIMIT
+
+    stmt = (
+        select(CategoryCorrection.description, Category.name)
+        .join(Category, Category.id == CategoryCorrection.category_id)
+        .where(CategoryCorrection.org_id == org_id)
+        .order_by(CategoryCorrection.created_at.desc())
+        .limit(FEW_SHOT_EXAMPLE_LIMIT)
+    )
+    return [
+        CorrectionExample(description=description, category_name=category_name)
+        for description, category_name in db.execute(stmt).all()
+    ]
+
+
 def run_pipeline(document_id: uuid.UUID, db: Session, deps: PipelineDeps | None = None) -> Document:
     """Drive one Document through extraction and return it, status updated.
 
@@ -422,8 +509,15 @@ def run_pipeline(document_id: uuid.UUID, db: Session, deps: PipelineDeps | None 
     if deps is None:
         deps = default_deps()
 
+    categories = list(
+        db.execute(org_scoped_select(Category, document.org_id).order_by(Category.name)).scalars()
+    )
+    examples = _recent_corrections(db, document.org_id)
+
     try:
-        _build_graph(document, db, deps, threshold).invoke({"document_id": str(document_id)})
+        _build_graph(document, db, deps, threshold, categories, examples).invoke(
+            {"document_id": str(document_id)}
+        )
     except Exception:
         db.rollback()
         failed = db.get(Document, document_id)

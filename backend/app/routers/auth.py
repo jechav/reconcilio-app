@@ -3,7 +3,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import OrgMembership, OrgRole, Organization, User
+from app.models import STARTER_CATEGORY_NAMES, Category, OrgMembership, OrgRole, Organization, User
 from app.schemas import (
     AcceptInviteRequest,
     LoginRequest,
@@ -38,6 +38,12 @@ def signup(payload: SignupRequest, db: Session = Depends(get_db)) -> TokenRespon
     db.add(user)
     db.add(organization)
     db.flush()
+
+    # Every new Organization starts with a flat starter set of Categories
+    # (issue #5, AC1) -- ordinary, editable/deletable rows, not special-cased
+    # anywhere else in the app.
+    for name in STARTER_CATEGORY_NAMES:
+        db.add(Category(org_id=organization.id, name=name))
 
     membership = OrgMembership(user_id=user.id, org_id=organization.id, role=OrgRole.owner)
     db.add(membership)

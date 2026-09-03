@@ -6,8 +6,8 @@ either automatically by the matching algorithm or manually by a user (issue
 #6, ADR-0002). Each side is unique across the table, which is what makes
 one-to-one a database-level guarantee.
 
-Revision ID: 0005
-Revises: 0004
+Revision ID: 0006
+Revises: 0005
 Create Date: 2026-09-03
 
 """
@@ -17,8 +17,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0005"
-down_revision: Union[str, None] = "0004"
+revision: str = "0006"
+down_revision: Union[str, None] = "0005"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
