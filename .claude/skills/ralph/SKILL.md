@@ -1,25 +1,31 @@
 ---
 name: ralph
-description: "Automated ticket execution loop: claim every eligible ready-for-agent GitHub issue, implement each in its own isolated worktree via /implement, validate, open a linked PR, and merge it (resolving conflicts) before picking up newly-unblocked issues."
+description: "Automated ticket execution loop: claim one eligible ready-for-agent GitHub issue at a time, implement it in its own isolated worktree via /implement, validate, open a linked PR, and merge it (resolving conflicts) before claiming the next one."
 disable-model-invocation: true
 ---
 
 One `/ralph` invocation drains the whole `ready-for-agent` pool in a loop —
-claim, dispatch, merge each PR as it lands, re-check for newly-unblocked
-issues, repeat — rather than doing a single tick. It is still only
-invoked manually, not scheduled. Conventions (state machine, labels,
-dependency resolution, worktree layout, PR template, test isolation) are
-documented in full in [docs/agents/ralph.md](../../../docs/agents/ralph.md)
-— read it first if anything below is ambiguous, it is the source of truth.
+claim one ticket, dispatch it, wait for its PR to merge (or for it to fail),
+re-check for newly-unblocked issues, repeat — rather than doing a single
+tick. Tickets are processed **strictly one at a time, start to merge**: the
+next ticket is not claimed until the current one has landed on `main` or
+been moved to `ralph:failed`. This is deliberate — it keeps each ticket's
+`/implement` flow (TDD → validate → merge) fully attended, and never lets a
+sibling ticket build on top of another ticket's unmerged, unvalidated work.
+It is still only invoked manually, not scheduled. Conventions (state
+machine, labels, dependency resolution, worktree layout, PR template, test
+isolation) are documented in full in
+[docs/agents/ralph.md](../../../docs/agents/ralph.md) — read it first if
+anything below is ambiguous, it is the source of truth.
 
 Infer `<owner>/<repo>` from `git remote -v` as usual.
 
 ## Orchestrator procedure
 
 Run this yourself, in this turn, before spawning anything. This loops until
-the pool is drained: dispatch every currently eligible issue, merge each PR
-as it lands (which can unblock more issues), re-check eligibility, and
-repeat until nothing eligible remains and nothing is in flight.
+the pool is drained: claim and dispatch exactly one eligible issue, wait for
+it to merge or fail, re-check eligibility (a merge can unblock more issues),
+and repeat until nothing eligible remains.
 
 1. **Precondition**: confirm Postgres is reachable, e.g.
    `pg_isready -h localhost -p 5432` or a `psql ... -c 'select 1'`. If it's
@@ -33,7 +39,10 @@ repeat until nothing eligible remains and nothing is in flight.
    ```
 
 3. **Loop** until there are no unclaimed `ready-for-agent` issues left *and*
-   nothing is in flight (`ralph:in-progress` or `ralph:pr-open`):
+   nothing is in flight (`ralph:in-progress` or `ralph:pr-open`). At every
+   point in this loop, **at most one issue** carries `ralph:in-progress` or
+   `ralph:pr-open` — never claim or dispatch a second ticket while one is
+   still in flight:
 
    a. **Filter to the eligible set.** For each unclaimed issue `n`, apply
       the dependency rules in `docs/agents/ralph.md` § "Dependency /
@@ -46,33 +55,38 @@ repeat until nothing eligible remains and nothing is in flight.
       - If `issue_dependencies_summary` is null, fall back to parsing a
         `## Blocked by` section in the issue body and apply the same
         closed-check per referenced issue.
+      - An issue that is itself a parent/epic (its body is the original
+        full spec rather than a `## What to build` ticket, e.g. it says its
+        spec was split into sub-tickets via `/to-tickets`) is never
+        eligible — skip it and note it in the final report instead.
 
    b. If nothing is eligible and nothing is currently in flight, stop
       looping and report (e.g. "N issues remain, all blocked on tickets
       that haven't merged yet").
 
-   c. **Claim** every eligible issue sequentially, one at a time, *before*
-      spawning any subagent — this is what prevents two subagents racing
-      to claim the same ticket, since `gh` has no compare-and-swap:
+   c. **Pick one** issue from the eligible set — the lowest issue number,
+      for determinism — and **claim** it:
       ```bash
       gh issue edit <n> --add-assignee @me --add-label ralph:in-progress --remove-label ready-for-agent
       ```
+      Do not claim any other issue right now, even if several are eligible.
 
-   d. **Dispatch**: for each newly-claimed ticket, spawn one `Agent` tool
-      call (running concurrently, background is fine — there is no cap on
-      how many run at once) with a fully self-contained prompt covering:
-      the issue number, the worktree path
-      (`.claude/worktrees/issue-<n>-<slug>`), the branch name
-      (`claude/issue-<n>-<hash>`), that the base branch is `main`, and the
-      full "Per-ticket executor procedure" below (paste it into the
-      prompt — the spawned agent has no access to this conversation).
+   d. **Dispatch**: spawn exactly one `Agent` tool call for this ticket, and
+      **wait for it to finish before doing anything else** (do not move on
+      to another issue, and do not spawn a second agent, while this one is
+      running) with a fully self-contained prompt covering: the issue
+      number, the worktree path (`.claude/worktrees/issue-<n>-<slug>`), the
+      branch name (`claude/issue-<n>-<hash>`), that the base branch is
+      `main`, and the full "Per-ticket executor procedure" below (paste it
+      into the prompt — the spawned agent has no access to this
+      conversation).
 
-   e. **As each per-ticket agent reports back**, handle it:
+   e. **When the per-ticket agent reports back**, handle it before doing
+      anything else:
       - *Validation failure*: nothing further to do — the executor already
-        left it in `ralph:failed` per its own procedure.
-      - *PR opened*: merge it yourself, sequentially (only one merge into
-        `main` at a time, even if several PRs finish around the same
-        time):
+        left it in `ralph:failed` per its own procedure. Go back to (a) to
+        pick the next ticket.
+      - *PR opened*: merge it immediately, before claiming anything else:
         ```bash
         gh pr merge <pr-number> --merge
         ```
@@ -89,11 +103,13 @@ repeat until nothing eligible remains and nothing is in flight.
           comment explaining what was tried and why, leave the worktree in
           place, go back to (a) (this issue's dependents stay blocked).
 
-   f. Continue the loop from (a).
+   f. Continue the loop from (a) — only now, with nothing in flight, may
+      the next ticket be claimed.
 
 4. **Report** a final summary once the loop ends: how many tickets were
    merged, how many landed in `ralph:failed` (and why), and how many
-   remain un-eligible because they're blocked on a failed ticket.
+   remain un-eligible because they're blocked on a failed ticket or because
+   they're a parent/epic issue skipped per step 3a.
 
 ## Per-ticket executor procedure
 

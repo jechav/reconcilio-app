@@ -8,19 +8,28 @@ invocation can drain an entire dependency chain. It follows the
 "Ralph Wiggum" methodology: a simple, repeatable loop rather than a smart
 planner.
 
+Ralph processes **exactly one ticket at a time, start to merge**, before
+claiming the next one. This is a deliberate choice, not a performance
+shortcut: it keeps `/implement`'s TDD → validate → merge flow fully
+attended for each ticket, avoids the review load of several PRs landing at
+once, and means a bad ticket is caught and left in `ralph:failed` before
+any sibling ticket's work builds on top of it. There is exactly one ticket
+in `ralph:in-progress` or `ralph:pr-open` at any moment during a Ralph run.
+
 The per-ticket executor follows `/implement`'s *practices* (TDD at natural
 seams, regular typechecking, a full test-suite run, self-review, incremental
 commits) rather than invoking `/implement` as a skill — `/implement` has
 `disable-model-invocation: true` and refuses non-interactive invocation, and
 there is no human present in a Ralph run to invoke it themselves.
 
-Each `/ralph` invocation loops against live GitHub state — claim every
-currently eligible issue, dispatch, merge each PR as it lands, re-check for
-newly-unblocked issues, repeat — until the pool is fully drained. It is
-**not** scheduled or backgrounded — a human runs it when they want the pool
-drained. This keeps state entirely in GitHub (labels + assignee), so nothing
-needs to survive locally between invocations, and any bug in the claim logic
-can't compound silently across unattended runs.
+Each `/ralph` invocation loops against live GitHub state — pick the single
+best eligible issue, claim it, dispatch it, wait for it to either merge or
+fail, re-check for newly-eligible issues (a merge can unblock one), repeat
+— until the pool is fully drained. It is **not** scheduled or backgrounded
+— a human runs it when they want the pool drained. This keeps state
+entirely in GitHub (labels + assignee), so nothing needs to survive locally
+between invocations, and any bug in the claim logic can't compound silently
+across unattended runs.
 
 ## State machine
 
@@ -32,22 +41,25 @@ to make Ralph's own state visible in the GitHub UI.
 
 ```
 ready-for-agent, unassigned                          [pickup pool]
-        |  claim (orchestrator, sequential, before fan-out):
+        |  claim (orchestrator, exactly one ticket, before dispatch):
         |    gh issue edit <n> --add-assignee @me --add-label ralph:in-progress --remove-label ready-for-agent
         v
-ralph:in-progress, assigned                [claimed; no cap on how many at once]
+ralph:in-progress, assigned          [claimed; the only in-flight ticket]
+        |  orchestrator dispatches one Agent call and waits for it to
+        |  finish (foreground) before doing anything else
         |
         +-- success: gh pr create ...
         |     gh issue edit <n> --remove-label ralph:in-progress --add-label ralph:pr-open
         |     -> ralph:pr-open, assigned  [executor reports back; worktree left in place]
         |         |
-        |         |  orchestrator (sequential, one merge at a time):
+        |         |  orchestrator, immediately, before claiming anything else:
         |         |    gh pr merge <pr> --merge
         |         |    on conflict: resolve in the worktree, re-validate, retry
         |         v
         |     merged to main -> issue auto-closes (PR body's "Closes #n")
         |     git worktree remove <worktree-path>
         |     -> unblocks any dependent still waiting on this issue
+        |     -> only now does the orchestrator pick the next ticket to claim
         |
         +-- failure (validation never goes green, OR merge conflict that
             can't be resolved cleanly):
@@ -56,15 +68,19 @@ ralph:in-progress, assigned                [claimed; no cap on how many at once]
               gh issue comment <n> --body "<what was tried, why it failed, worktree path>"
               worktree left in place (not removed)
               -> ralph:failed, unassigned  [human queue: gh issue list --label ralph:failed; also blocks any dependent indefinitely]
+              -> orchestrator moves on to pick the next eligible ticket
 ```
 
 `ready-for-agent` is removed at **claim** time, not at PR-open time — this is
-what keeps the pickup-pool query in sync with no separate bookkeeping. There
-is no artificial concurrency cap: every currently eligible issue is claimed
-and dispatched. The only natural throttle is that a dependent isn't eligible
-until its blocker is actually merged (see below), so the in-flight count
-grows and shrinks with the shape of the dependency graph rather than a fixed
-limit.
+what keeps the pickup-pool query in sync with no separate bookkeeping. Ralph
+enforces a strict concurrency cap of **one**: at most one issue carries
+`ralph:in-progress` or `ralph:pr-open` at any moment. The orchestrator does
+not claim, dispatch, or even pick a second ticket until the current one has
+either merged to `main` or been moved to `ralph:failed`. This trades
+throughput for attention — each ticket gets `/implement`'s full TDD →
+validate → merge flow watched end to end before the next one starts, and a
+failing ticket never lets a sibling build on top of unmerged, unvalidated
+work.
 
 ## Dependency / stacking resolution
 
@@ -90,10 +106,12 @@ dependencies not populated), fall back to parsing a `## Blocked by` section
 in the issue body for `#<n>` references, and apply the same closed-check to
 each referenced issue via `gh issue view <b> --json state`.
 
-Among the eligible set, claim and dispatch **all of them**, oldest issue
-number first for determinism — there is no per-tick slot limit. Re-run this
-eligibility check after every merge, since a merge can unblock issues that
-weren't eligible a moment ago; repeat until the pool is drained.
+Among the eligible set, pick **one** — the lowest issue number, for
+determinism — claim it, and dispatch it alone. Do not claim or dispatch any
+other issue until this one has merged or failed. Re-run this eligibility
+check after every merge and after every failure, since a merge can unblock
+issues that weren't eligible a moment ago; repeat until the pool is
+drained.
 
 ## Branch, worktree, and PR conventions
 
@@ -133,8 +151,12 @@ no stacking or PR-retargeting to manage.
 
 ## Postgres test isolation
 
-Any number of tickets can be validating concurrently, so each gets its own
-test database rather than sharing one:
+Only one ticket validates at a time under the current one-at-a-time
+orchestrator, but each ticket still gets its own test database named after
+its issue number rather than a shared one — this keeps a requeued or
+re-run ticket from colliding with leftover state from a previous attempt,
+and keeps the recipe correct if the orchestrator is ever changed back to
+running tickets concurrently:
 
 ```bash
 DB_NAME="reconcilio_test_issue_<n>"
@@ -186,13 +208,14 @@ When a ticket lands in `ralph:failed`:
 ## Future: scheduled / workflow-based execution
 
 A single `/ralph` invocation now drains the whole pool on its own — claim,
-dispatch, merge, re-check for newly-unblocked issues, repeat until nothing
-eligible remains — rather than doing one tick and stopping. It's still
-manual-invocation-only, not scheduled. If usage grows to where continuous,
-unattended draining is wanted (e.g. triggered automatically whenever a new
-`ready-for-agent` issue appears, not just when a human remembers to run
-`/ralph`), the natural upgrade path is the `Workflow` tool (true worktree
-isolation, native `parallel`/`pipeline` primitives) driven by a recurring
-`CronCreate` schedule — the orchestrator/executor split above maps directly
-onto a workflow's discovery step and per-ticket `agent()` calls. Not built
-now; requires an explicit opt-in to the `Workflow` tool.
+dispatch, wait for merge or failure, re-check for newly-unblocked issues,
+repeat until nothing eligible remains — rather than doing one tick and
+stopping. It processes strictly one ticket at a time by design (see above),
+not for lack of a concurrency mechanism. It's still manual-invocation-only,
+not scheduled. If a future need calls for higher throughput or continuous,
+unattended draining, the natural upgrade path is the `Workflow` tool (true
+worktree isolation, native `parallel`/`pipeline` primitives) driven by a
+recurring `CronCreate` schedule — but that would be a deliberate return to
+concurrent execution, and should only be adopted if the one-at-a-time
+attentiveness this design trades for is no longer needed. Not built now;
+requires an explicit opt-in to the `Workflow` tool.
