@@ -30,7 +30,7 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-DEFAULT_CONFIDENCE_THRESHOLD = 0.8
+DEFAULT_CONFIDENCE_THRESHOLD = Decimal("0.80")
 
 
 class OrgRole(str, enum.Enum):
@@ -44,10 +44,12 @@ class Organization(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    # Fields extracted below this confidence are refined by the LLM pass and,
-    # if still low afterwards, flagged for human review. Owner-configurable.
-    confidence_threshold: Mapped[float] = mapped_column(
-        Float, nullable=False, default=DEFAULT_CONFIDENCE_THRESHOLD, server_default="0.8"
+    # Minimum acceptable per-field/per-line extraction confidence (0-1)
+    # below which a field is sent through llm_refine for a second pass; a
+    # field still low afterwards flags its Transaction for human review.
+    # Owner-configurable, see PATCH /orgs/me/settings.
+    confidence_threshold: Mapped[Decimal] = mapped_column(
+        Numeric(3, 2), nullable=False, default=DEFAULT_CONFIDENCE_THRESHOLD, server_default="0.80"
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
 
@@ -93,6 +95,10 @@ class DocumentType(str, enum.Enum):
 class DocumentStatus(str, enum.Enum):
     queued = "queued"
     processing = "processing"
+    # Pipeline ran to completion but either classify_document could not
+    # confidently place the Document as invoice/receipt or bank statement
+    # (issue #3, AC1), or at least one of its Transactions needs a human
+    # look (issue #4, AC4) -- flagged rather than silently misprocessed.
     needs_review = "needs_review"
     done = "done"
     failed = "failed"
@@ -101,10 +107,10 @@ class DocumentStatus(str, enum.Enum):
 class TransactionStatus(str, enum.Enum):
     """Review state of a single extracted line.
 
-    `resolved` means nothing about the line needs a human: every field came
-    back at or above the Organization's confidence threshold (or from a
-    structured parse, which is exact). `needs_review` is the flag a human
-    clears in the review UI.
+    `resolved` means every field on the line cleared the Organization's
+    confidence threshold (or came from a structured parse, which is exact
+    by definition); `needs_review` is the flag a human clears in the review
+    UI.
     """
 
     needs_review = "needs_review"
@@ -127,8 +133,7 @@ class Document(Base):
     """A source file uploaded by a user (invoice, receipt, or bank statement).
 
     Stored in MinIO under `minio_key`; `status` tracks progress through the
-    (currently stub) extraction pipeline. See CONTEXT.md for the full
-    domain definition.
+    extraction pipeline. See CONTEXT.md for the full domain definition.
     """
 
     __tablename__ = "documents"
@@ -158,9 +163,11 @@ class Document(Base):
 class Transaction(Base):
     """One normalized line item extracted from a Document.
 
-    An invoice/receipt Document yields exactly one; a bank statement yields
-    one per statement line (`line_number` preserves statement order). Amount
-    sign carries direction: negative is money out, positive money in.
+    An invoice/receipt Document yields exactly one Transaction -- always
+    `line_number` 1, `description` holding the vendor name and `txn_date`
+    the invoice date (issue #3). A bank statement yields one per statement
+    line, in order (issue #4). Amount sign carries direction: negative is
+    money out, positive money in.
     """
 
     __tablename__ = "transactions"
@@ -195,12 +202,15 @@ class Transaction(Base):
 
 
 class ExtractionResult(Base):
-    """Raw per-field extraction output for one line of one Document.
+    """Raw per-line extraction output for one line of one Document.
 
     `fields` is `{field_name: {value, confidence, method}}` so the origin of
     every single field is recoverable regardless of ingestion path; `method`
-    and `confidence` on the row itself summarise the line as a whole (the
-    weakest field's method/confidence).
+    and `confidence` on the row itself summarize the line as a whole (the
+    weakest field's method/confidence). An invoice/receipt Document has
+    exactly one row (`line_number` 1, fields named `date`/`description`/
+    `amount` the same as a bank-statement line -- see app/pipeline.py); a
+    bank statement has one row per statement line.
     """
 
     __tablename__ = "extraction_results"
@@ -239,7 +249,7 @@ class AuditLogEntry(Base):
     org_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False, index=True
     )
-    actor: Mapped[str] = mapped_column(String(255), nullable=False)
+    actor: Mapped[str] = mapped_column(String(255), nullable=False, default="system")
     action: Mapped[str] = mapped_column(String(255), nullable=False)
     entity_type: Mapped[str] = mapped_column(String(64), nullable=False)
     entity_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)

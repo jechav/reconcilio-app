@@ -1,19 +1,36 @@
-"""OCR path: AWS Textract table extraction for PDF/image bank statements.
+"""AWS Textract client: OCR for both extraction paths.
 
-A bank statement is a table, so `AnalyzeDocument` with the TABLES feature is
-the right Textract call -- it gives us cells with per-cell confidence, which
-is exactly the granularity the audit trail wants (one confidence per field,
-not one per document).
+Three Textract calls are used, each for a distinct pipeline step so we
+never pay for a more expensive structured call when it isn't needed:
 
-The client is behind a Protocol so the pipeline never imports boto3 and the
-tests can substitute a fake at the network boundary. There are no AWS
-credentials in the test/dev sandbox, so `AwsTextractClient` is exercised
-only against recorded Textract response blocks, never live.
+- `detect_text`: generic OCR (Textract's DetectDocumentText) used by
+  `classify` on the invoice/receipt path to get raw text lines cheaply, to
+  confirm the declared Document.doc_type actually looks like what it
+  claims to be (issue #3, AC1).
+- `analyze_expense`: Textract's AnalyzeExpense API, purpose-built for
+  invoices/receipts -- returns per-field values with a Confidence score
+  (0-100) for exactly the fields we care about (vendor, total, date).
+- `analyze_document` with the TABLES feature: the right call for a bank
+  statement, which is a table -- it gives us cells with per-cell
+  confidence, exactly the granularity the audit trail wants (one
+  confidence per field, not one per document). `parse_textract_tables`
+  below turns that raw response into candidate statement lines.
+
+Real credentials are never available in CI/tests; `TextractClient` is a
+Protocol so tests inject a fake implementing these methods, while
+`AwsTextractClient` is the real AWS-backed implementation used in
+production (constructed lazily -- building a boto3 client does not itself
+require valid credentials, only calling it does).
 """
 
+from __future__ import annotations
+
+from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Protocol
 
-from app.extraction.types import ExtractedField, ExtractedLine
+from app.extraction.types import ExtractedField as LineField
+from app.extraction.types import ExtractedLine
 from app.models import ExtractionMethod
 
 # Textract confidences are 0-100; the rest of the system works in 0-1.
@@ -25,12 +42,49 @@ _AMOUNT_HEADERS = ("amount", "value")
 _DEBIT_HEADERS = ("debit", "withdrawal", "withdrawals", "money out")
 _CREDIT_HEADERS = ("credit", "deposit", "deposits", "money in")
 
+# Textract AnalyzeExpense SummaryField "Type.Text" values we understand,
+# mapped to this app's field names (see ExtractionResult.fields).
+_TEXTRACT_FIELD_MAP: dict[str, str] = {
+    "VENDOR_NAME": "vendor",
+    "TOTAL": "amount",
+    "AMOUNT_DUE": "amount",
+    "INVOICE_RECEIPT_DATE": "invoice_date",
+}
+
+FIELD_NAMES = ("vendor", "amount", "invoice_date")
+
+
+@dataclass(frozen=True)
+class ExtractedField:
+    """One AnalyzeExpense summary field. Distinct from
+    `app.extraction.types.ExtractedField` (which lacks a name and is keyed
+    by position in a line's `fields` dict instead) -- this is the raw shape
+    Textract itself returns."""
+
+    name: str
+    value: str
+    confidence: float  # normalized 0.0-1.0
+
+
+@dataclass(frozen=True)
+class TextractExpenseResult:
+    fields: list[ExtractedField]
+
 
 class TextractClient(Protocol):
-    """The narrow slice of Textract this pipeline depends on."""
+    """The narrow slice of Textract either pipeline path depends on."""
+
+    def detect_text(self, document_bytes: bytes) -> list[str]:
+        """Return raw text lines, cheapest-possible OCR pass."""
+        ...
+
+    def analyze_expense(self, document_bytes: bytes) -> TextractExpenseResult:
+        """Structured invoice/receipt extraction with per-field confidence."""
+        ...
 
     def analyze_document(self, document_bytes: bytes) -> dict[str, Any]:
         """Return a raw Textract AnalyzeDocument response (TABLES feature)."""
+        ...
 
 
 class AwsTextractClient:
@@ -47,11 +101,45 @@ class AwsTextractClient:
             self._client = boto3.client("textract", region_name=self._region_name)
         return self._client
 
+    def detect_text(self, document_bytes: bytes) -> list[str]:
+        response = self._boto_client().detect_document_text(Document={"Bytes": document_bytes})
+        return [
+            block["Text"]
+            for block in response.get("Blocks", [])
+            if block.get("BlockType") == "LINE" and "Text" in block
+        ]
+
+    def analyze_expense(self, document_bytes: bytes) -> TextractExpenseResult:
+        response = self._boto_client().analyze_expense(Document={"Bytes": document_bytes})
+        fields: list[ExtractedField] = []
+        for expense_doc in response.get("ExpenseDocuments", []):
+            for summary_field in expense_doc.get("SummaryFields", []):
+                field_type = summary_field.get("Type", {}).get("Text")
+                mapped_name = _TEXTRACT_FIELD_MAP.get(field_type)
+                if mapped_name is None:
+                    continue
+                value_detection = summary_field.get("ValueDetection", {})
+                value = value_detection.get("Text")
+                confidence = value_detection.get("Confidence")
+                if value is None or confidence is None:
+                    continue
+                fields.append(
+                    ExtractedField(name=mapped_name, value=value, confidence=confidence / 100.0)
+                )
+        return TextractExpenseResult(fields=fields)
+
     def analyze_document(self, document_bytes: bytes) -> dict[str, Any]:
         response = self._boto_client().analyze_document(
             Document={"Bytes": document_bytes}, FeatureTypes=["TABLES"]
         )
         return dict(response)
+
+
+@lru_cache
+def get_textract_client() -> TextractClient:
+    from app.config import get_settings
+
+    return AwsTextractClient(region_name=get_settings().aws_region)
 
 
 def parse_textract_tables(response: dict[str, Any]) -> list[ExtractedLine]:
@@ -189,9 +277,9 @@ def _rows_to_lines(rows: list[list[tuple[str, float]]], columns: dict[str, int])
     return lines
 
 
-def _field(text: str, confidence: float) -> ExtractedField:
+def _field(text: str, confidence: float) -> LineField:
     cleaned = text.strip()
-    return ExtractedField(
+    return LineField(
         value=cleaned or None,
         # An empty cell is not "confidently empty" -- it is a field the OCR
         # failed to read, so it must fall below any threshold and be refined.

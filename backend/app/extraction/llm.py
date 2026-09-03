@@ -1,23 +1,41 @@
-"""LLM refinement pass for fields Textract wasn't confident about.
+"""LLM refinement: the second pass for fields Textract wasn't confident about.
 
-Only the low-confidence fields of a line are sent for a second opinion, so
-the cost scales with how bad the scan is rather than with statement length.
-Refined fields come back marked `llm` with the model's own reported
+Two refiner shapes coexist here because the two extraction paths hand the
+model genuinely different context:
+
+- `LlmRefiner` (text-based, bank statement path, issue #4): only the
+  low-confidence fields of one statement *line* are sent for a second
+  opinion, so cost scales with how bad the scan is rather than with
+  statement length. `OpenRouterRefiner` is the real implementation, a
+  single OpenAI-compatible chat completion per line via OpenRouter.
+- `LLMRefinementClient` (vision-based, invoice/receipt path, issue #3): one
+  low-confidence *field* at a time is re-read from the document image
+  itself via a vision-capable model, since an invoice/receipt has no
+  cheaper structured representation to fall back on the way a statement
+  line's other fields do. `LiteLLMRefinementClient` is the real
+  implementation, via `litellm.completion`.
+
+Both are Protocols so tests inject fakes; neither real implementation is
+ever exercised in tests (no live OpenRouter credentials in this sandbox).
+Refined fields always come back marked `llm` with the model's own reported
 confidence, which keeps the per-field provenance honest: a value corrected
 by the model is never presented as if OCR had read it cleanly.
-
-The refiner is a Protocol; the OpenRouter implementation is real but is
-never exercised in tests (no API key in the sandbox) -- tests substitute a
-fake at this boundary.
 """
 
+from __future__ import annotations
+
+import base64
 import json
+from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Protocol
 
 from app.extraction.types import ExtractedField, ExtractedLine
 from app.models import ExtractionMethod
 
-_SYSTEM_PROMPT = (
+DEFAULT_MODEL = "openrouter/anthropic/claude-3-haiku"
+
+_LINE_SYSTEM_PROMPT = (
     "You correct OCR errors on bank statement lines. You are given the fields "
     "of one line and the names of the fields the OCR was unsure about. Reply "
     "with JSON only: {\"fields\": {\"<name>\": {\"value\": <string>, "
@@ -27,9 +45,21 @@ _SYSTEM_PROMPT = (
     "unchanged with a low confidence."
 )
 
+_FIELD_PROMPT_TEMPLATE = (
+    "You are extracting the field '{field_name}' from the attached invoice or "
+    "receipt image. Textract's first-pass guess for this field was: {current_value!r} "
+    "(low confidence). Look at the image and return your best value for this field. "
+    "Respond with ONLY a JSON object of the form "
+    '{{"value": "<the field value as plain text, or null if not present>", '
+    '"confidence": <your confidence from 0.0 to 1.0>}}.'
+)
+
+
+# --- text-based: bank statement lines (issue #4) ---------------------------
+
 
 class LlmRefiner(Protocol):
-    """Second-pass correction of specific low-confidence fields."""
+    """Second-pass correction of specific low-confidence fields on one line."""
 
     def refine(self, line: ExtractedLine, field_names: list[str]) -> dict[str, ExtractedField]:
         """Return replacements for (a subset of) `field_names`."""
@@ -52,7 +82,7 @@ class OpenRouterRefiner:
             "temperature": 0,
             "response_format": {"type": "json_object"},
             "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "system", "content": _LINE_SYSTEM_PROMPT},
                 {
                     "role": "user",
                     "content": json.dumps(
@@ -112,3 +142,66 @@ def parse_refinement(content: str, field_names: list[str]) -> dict[str, Extracte
             method=ExtractionMethod.llm,
         )
     return refined
+
+
+# --- vision-based: invoice/receipt fields (issue #3) ------------------------
+
+
+@dataclass(frozen=True)
+class RefinedField:
+    value: str | None
+    confidence: float  # 0.0-1.0
+
+
+class LLMRefinementClient(Protocol):
+    def refine_field(
+        self,
+        field_name: str,
+        document_bytes: bytes,
+        content_type: str,
+        current_value: str | None,
+    ) -> RefinedField: ...
+
+
+class LiteLLMRefinementClient:
+    """Real implementation: one vision-model call per low-confidence field."""
+
+    def __init__(self, model: str = DEFAULT_MODEL) -> None:
+        self._model = model
+
+    def refine_field(
+        self,
+        field_name: str,
+        document_bytes: bytes,
+        content_type: str,
+        current_value: str | None,
+    ) -> RefinedField:
+        import litellm
+
+        encoded = base64.b64encode(document_bytes).decode("ascii")
+        data_url = f"data:{content_type};base64,{encoded}"
+        response = litellm.completion(
+            model=self._model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": _FIELD_PROMPT_TEMPLATE.format(
+                                field_name=field_name, current_value=current_value
+                            ),
+                        },
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                }
+            ],
+        )
+        content = response.choices[0].message.content
+        parsed = json.loads(content)
+        return RefinedField(value=parsed.get("value"), confidence=float(parsed.get("confidence", 0.0)))
+
+
+@lru_cache
+def get_llm_client() -> LLMRefinementClient:
+    return LiteLLMRefinementClient()

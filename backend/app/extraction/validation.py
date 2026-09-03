@@ -78,21 +78,32 @@ class ValidationOutcome(BaseModel):
         return self.line is not None
 
 
+def validate_line(
+    raw: ExtractedLine,
+    *,
+    date_field: str = "date",
+    description_field: str = "description",
+    amount_field: str = "amount",
+) -> ValidationOutcome:
+    """Validate one line, reading its date/description/amount from whichever
+    field names that ingestion path uses. Bank-statement lines use the
+    generic `date`/`description`/`amount`; the invoice/receipt path (always
+    a single line) passes its own `invoice_date`/`vendor`/`amount` field
+    names instead -- see app/pipeline.py."""
+    try:
+        line = BankStatementLine(
+            line_number=raw.line_number,
+            txn_date=raw.value(date_field),  # type: ignore[arg-type]
+            description=raw.value(description_field),  # type: ignore[arg-type]
+            amount=raw.value(amount_field),  # type: ignore[arg-type]
+        )
+    except Exception as exc:  # pydantic ValidationError, or a bad raw value
+        return ValidationOutcome(line_number=raw.line_number, error=_summarize(exc))
+    return ValidationOutcome(line_number=raw.line_number, line=line)
+
+
 def validate_lines(raw_lines: list[ExtractedLine]) -> list[ValidationOutcome]:
-    outcomes: list[ValidationOutcome] = []
-    for raw in raw_lines:
-        try:
-            line = BankStatementLine(
-                line_number=raw.line_number,
-                txn_date=raw.value("date"),  # type: ignore[arg-type]
-                description=raw.value("description"),  # type: ignore[arg-type]
-                amount=raw.value("amount"),  # type: ignore[arg-type]
-            )
-        except Exception as exc:  # pydantic ValidationError, or a bad raw value
-            outcomes.append(ValidationOutcome(line_number=raw.line_number, error=_summarize(exc)))
-        else:
-            outcomes.append(ValidationOutcome(line_number=raw.line_number, line=line))
-    return outcomes
+    return [validate_line(raw) for raw in raw_lines]
 
 
 def _summarize(exc: Exception) -> str:

@@ -1,4 +1,11 @@
-"""transactions, extraction results, audit log; org confidence threshold
+"""real extraction: confidence threshold, transactions, extraction results,
+audit log entries
+
+Consolidates the two independently-developed extraction migrations from
+issue #3 (invoice/receipt) and issue #4 (bank statement): both introduced an
+overlapping-but-incompatible shape for Transaction/ExtractionResult, so this
+migration is the single, unified schema both pipeline paths persist through
+(see app/models.py and app/pipeline.py) rather than two competing 0003s.
 
 Revision ID: 0003
 Revises: 0002
@@ -25,12 +32,14 @@ extraction_method = postgresql.ENUM(
 
 
 def upgrade() -> None:
-    # A Document is needs_review whenever any of its Transactions is.
+    # A Document is needs_review whenever any of its Transactions is (bank
+    # statement path), or when classify_document could not confidently place
+    # it (invoice/receipt path).
     op.execute("ALTER TYPE document_status ADD VALUE IF NOT EXISTS 'needs_review' BEFORE 'done'")
 
     op.add_column(
         "organizations",
-        sa.Column("confidence_threshold", sa.Float(), nullable=False, server_default="0.8"),
+        sa.Column("confidence_threshold", sa.Numeric(3, 2), nullable=False, server_default="0.80"),
     )
 
     transaction_status.create(op.get_bind(), checkfirst=True)
@@ -45,8 +54,13 @@ def upgrade() -> None:
         sa.Column(
             "document_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("documents.id"), nullable=False
         ),
+        # 1 for an invoice/receipt Document (exactly one Transaction);
+        # statement order for a bank statement (one per line, issue #4).
         sa.Column("line_number", sa.BigInteger(), nullable=False),
         sa.Column("txn_date", sa.Date(), nullable=False),
+        # Vendor name for invoice/receipt; the statement line's memo/payee
+        # for a bank statement -- one generic column serves both (issue #3 +
+        # issue #4 consolidation, see app/pipeline.py).
         sa.Column("description", sa.String(length=512), nullable=False),
         sa.Column("amount", sa.Numeric(precision=14, scale=2), nullable=False),
         sa.Column("confidence", sa.Float(), nullable=False),
@@ -76,6 +90,9 @@ def upgrade() -> None:
         sa.Column("line_number", sa.BigInteger(), nullable=False),
         sa.Column("method", extraction_method, nullable=False),
         sa.Column("confidence", sa.Float(), nullable=False),
+        # {field_name: {value, confidence, method}} for every field on the
+        # line -- keeps per-field provenance for both a single-field-per-line
+        # bank statement row and a multi-field invoice/receipt "line".
         sa.Column("fields", postgresql.JSONB(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     )
@@ -88,7 +105,7 @@ def upgrade() -> None:
         sa.Column(
             "org_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("organizations.id"), nullable=False
         ),
-        sa.Column("actor", sa.String(length=255), nullable=False),
+        sa.Column("actor", sa.String(length=255), nullable=False, server_default="system"),
         sa.Column("action", sa.String(length=255), nullable=False),
         sa.Column("entity_type", sa.String(length=64), nullable=False),
         sa.Column("entity_id", postgresql.UUID(as_uuid=True), nullable=False),

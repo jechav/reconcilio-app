@@ -1,9 +1,10 @@
 import uuid
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 
 from pydantic import BaseModel, EmailStr, Field
 
-from app.models import DocumentStatus, DocumentType, OrgRole
+from app.models import DocumentStatus, DocumentType, ExtractionMethod, OrgRole, TransactionStatus
 
 
 class SignupRequest(BaseModel):
@@ -30,8 +31,13 @@ class InviteRequest(BaseModel):
 class OrganizationOut(BaseModel):
     id: uuid.UUID
     name: str
+    confidence_threshold: Decimal
 
     model_config = {"from_attributes": True}
+
+
+class OrgSettingsUpdate(BaseModel):
+    confidence_threshold: Decimal = Field(gt=0, le=1)
 
 
 class UserOut(BaseModel):
@@ -81,3 +87,28 @@ class DocumentUploadRequest(BaseModel):
 class DocumentUploadResponse(BaseModel):
     document: DocumentOut
     upload_url: str
+
+
+class ExtractionResultOut(BaseModel):
+    id: uuid.UUID
+    document_id: uuid.UUID
+    transaction_id: uuid.UUID | None
+    line_number: int
+    method: ExtractionMethod
+    confidence: float
+    fields: dict[str, object]
+
+    model_config = {"from_attributes": True}
+
+
+class TransactionOut(BaseModel):
+    id: uuid.UUID
+    document_id: uuid.UUID
+    line_number: int
+    description: str
+    amount: Decimal
+    txn_date: date
+    confidence: float
+    status: TransactionStatus
+
+    model_config = {"from_attributes": True}
