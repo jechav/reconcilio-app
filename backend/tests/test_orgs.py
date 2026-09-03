@@ -115,10 +115,10 @@ def test_confidence_threshold_is_actually_used_by_the_pipeline(client, db_sessio
     import uuid
     from decimal import Decimal
 
-    from app.extraction.llm import RefinedField
     from app.extraction.textract import ExtractedField, TextractExpenseResult
-    from app.models import Document, DocumentStatus, DocumentType, Organization, Transaction
-    from app.pipeline import run_pipeline
+    from app.extraction.llm import NullRefiner
+    from app.models import Document, DocumentStatus, DocumentType, Organization, Transaction, TransactionStatus
+    from app.pipeline import PipelineDeps, run_pipeline
 
     owner = _signup(client, unique_email)
     org_id = uuid.UUID(owner["organization"]["id"])
@@ -160,14 +160,21 @@ def test_confidence_threshold_is_actually_used_by_the_pipeline(client, db_sessio
                 ]
             )
 
+        def analyze_document(self, document_bytes):  # pragma: no cover
+            raise AssertionError("invoice/receipt path never calls analyze_document")
+
     class _LLM:
         def refine_field(self, field_name, document_bytes, content_type, current_value):
             raise AssertionError("llm_refine should not run: 0.60 clears the 0.50 threshold")
 
-    monkeypatch.setattr("app.pipeline.get_object_bytes", lambda key: b"%PDF-1.4 fake")
-
-    result = run_pipeline(document.id, db_session, textract_client=_Textract(), llm_client=_LLM())
+    deps = PipelineDeps(
+        fetch_bytes=lambda key: b"%PDF-1.4 fake",
+        textract=_Textract(),
+        refiner=NullRefiner(),
+        llm_client=_LLM(),
+    )
+    result = run_pipeline(document.id, db_session, deps)
 
     assert result.status == DocumentStatus.done
     transaction = db_session.query(Transaction).filter_by(document_id=document.id).one()
-    assert transaction.review_status.value == "ok"
+    assert transaction.status == TransactionStatus.resolved

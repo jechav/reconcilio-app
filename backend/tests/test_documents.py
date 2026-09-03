@@ -76,9 +76,25 @@ class _FakeTextractClient:
             ]
         )
 
+    def analyze_document(self, document_bytes: bytes):  # pragma: no cover - not used here
+        raise AssertionError("invoice/receipt path never calls analyze_document")
+
+
+def _fake_pipeline_deps():
+    from app.extraction.llm import NullRefiner
+    from app.pipeline import PipelineDeps
+    from app.storage import get_object_bytes
+
+    return PipelineDeps(
+        fetch_bytes=get_object_bytes,
+        textract=_FakeTextractClient(),
+        refiner=NullRefiner(),
+        llm_client=None,
+    )
+
 
 def _upload_and_complete(client, headers, monkeypatch, document_id, upload_url):
-    monkeypatch.setattr("app.pipeline.get_textract_client", lambda: _FakeTextractClient())
+    monkeypatch.setattr("app.pipeline.default_deps", _fake_pipeline_deps)
     httpx.put(upload_url, content=b"%PDF-1.4 fake invoice bytes for testing").raise_for_status()
     return client.post(f"/documents/{document_id}/complete", headers=headers)
 

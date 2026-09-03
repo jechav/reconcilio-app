@@ -73,7 +73,12 @@ export function login(email: string, password: string): Promise<TokenResponse> {
 }
 
 export type DocumentType = "invoice_or_receipt" | "bank_statement";
-export type DocumentStatus = "queued" | "processing" | "done" | "failed";
+export type DocumentStatus =
+  | "queued"
+  | "processing"
+  | "needs_review"
+  | "done"
+  | "failed";
 
 export interface DocumentOut {
   id: string;

@@ -22,6 +22,13 @@ class Settings(BaseSettings):
     minio_bucket: str = "reconcilio"
     minio_secure: bool = False
 
+    # Extraction: AWS credentials come from the standard boto3 env chain; an
+    # empty openrouter_api_key disables LLM refinement (see llm.NullRefiner).
+    aws_region: str = "us-east-1"
+    openrouter_api_key: str = ""
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    llm_model: str = "openai/gpt-4o-mini"
+
     jwt_secret: str = "change-me-in-.env"
     jwt_algorithm: str = "HS256"
     jwt_expires_minutes: int = 60 * 24

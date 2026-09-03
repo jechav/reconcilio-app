@@ -1,48 +1,49 @@
-"""Extraction pipeline: classify -> ocr_extract -> llm_refine -> validate ->
-categorize -> persist.
+"""The extraction pipeline.
 
-Issue #2 built this graph's shape with no-op stub nodes so the async
-plumbing (upload -> Celery job -> pipeline -> Document.status transitions)
-could be proven end to end. Issue #3 fills in real behavior for the
-invoice/receipt path:
+Graph shape:
 
-- `classify`: confirms the declared Document.doc_type against the file's
-  actual content (app/extraction/classify.py); an unrecognized document is
-  flagged rather than silently misprocessed.
-- `ocr_extract`: AWS Textract's AnalyzeExpense API produces per-field
-  values with confidence scores (app/extraction/textract.py).
-- `llm_refine`: any field below the Organization's confidence_threshold
-  gets a second pass from a vision-capable LLM (app/extraction/llm.py).
-  Every field's origin (`ocr` vs `llm`) and confidence is recorded
-  uniformly regardless of path.
-- `validate`: the collected fields must satisfy `ExtractionSchema`
-  (app/extraction/schema.py) before persisting; a field that fails to
-  parse is treated as zero-confidence rather than persisted as-is.
-- `categorize`: still a stub -- Category assignment is a later ticket.
-- `persist`: writes one ExtractionResult per field, exactly one
-  Transaction, and an AuditLogEntry. A field still below threshold after
-  refinement flags the Transaction for human review rather than being
-  silently persisted as confident.
+    classify -+- invoice_ocr_extract -> invoice_llm_refine -+
+              +- ocr_extract -> llm_refine -------------------+- validate -> categorize -> persist
+              +- structured_parse -----------------------------+
+              +- flag_unknown -> END
 
-`categorize` and the bank-statement extraction path (issue #4) remain
-no-ops here; this ticket only "establishes the pattern" per the issue body.
+`classify` picks the branch from the Document's declared `doc_type` (and,
+for invoice/receipt, cross-checks it against a cheap OCR pass -- issue #3,
+AC1). A PDF/image bank statement takes the Textract-TABLES + line-level
+LLM-refinement branch; a CSV or OFX statement is already machine-readable,
+so it skips OCR and refinement entirely and takes the dedicated
+structured-parse branch (issue #4). An invoice/receipt takes Textract's
+AnalyzeExpense + per-field vision-LLM-refinement branch (issue #3). All
+three converge on the *same* validate/persist steps, which is what keeps
+the audit trail uniform: every line, on every path, becomes one
+`ExtractionResult` recording per-field value, confidence and method, and
+one `Transaction` (an invoice/receipt Document always has exactly one,
+`line_number` 1; a bank statement has one per statement line).
+
+The whole thing is callable as a plain function -- `run_pipeline(doc_id, db,
+deps)` -- with object storage, the Textract client and the LLM refiner(s)
+injected, so tests drive real pipeline behaviour with fakes only at those
+network boundaries.
 """
 
 from __future__ import annotations
 
 import uuid
-from decimal import Decimal, InvalidOperation
-from typing import Any, TypedDict
+from dataclasses import dataclass
+from typing import Any, Callable, TypedDict
 
 from langgraph.graph import END, START, StateGraph
-from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
-from app.extraction.classify import STRUCTURED_CONTENT_TYPES, detect_document_type
-from app.extraction.llm import LLMRefinementClient, get_llm_client
-from app.extraction.schema import ExtractionSchema
-from app.extraction.textract import FIELD_NAMES, TextractClient, get_textract_client
+from app.extraction import structured
+from app.extraction import textract as textract_module
+from app.extraction.classify import detect_document_type
+from app.extraction.llm import LlmRefiner, LLMRefinementClient, NullRefiner, OpenRouterRefiner, get_llm_client
+from app.extraction.textract import FIELD_NAMES, TextractClient
+from app.extraction.types import ExtractedField, ExtractedLine
+from app.extraction.validation import ValidationOutcome, validate_line, validate_lines
 from app.models import (
+    SYSTEM_ACTOR,
     AuditLogEntry,
     Document,
     DocumentStatus,
@@ -50,263 +51,362 @@ from app.models import (
     ExtractionMethod,
     ExtractionResult,
     Organization,
-    ReviewStatus,
     Transaction,
+    TransactionStatus,
 )
-from app.storage import get_object_bytes
+
+OCR_PATH = "ocr"
+STRUCTURED_PATH = "structured"
+INVOICE_PATH = "invoice"
+#: classify_document could not confidently place the Document (issue #3, AC1).
+UNKNOWN_PATH = "unknown"
 
 
-class FieldRecord(TypedDict):
-    value: str | None
-    confidence: float
-    method: ExtractionMethod
+class ExtractionFailed(RuntimeError):
+    """Nothing usable could be extracted -- the Document is marked failed."""
+
+
+@dataclass
+class PipelineDeps:
+    """The pipeline's network boundaries, injectable for tests.
+
+    `refiner` is the text-based, line-level refiner the bank-statement path
+    uses; `llm_client` is the vision-based, per-field refiner the
+    invoice/receipt path uses (see app/extraction/llm.py for why these are
+    two different Protocols). `llm_client` is optional -- tests that only
+    exercise the bank-statement paths never need to set it, and the
+    invoice/receipt path degrades to "no refinement" (like `NullRefiner`)
+    when it's absent.
+    """
+
+    fetch_bytes: Callable[[str], bytes]
+    textract: TextractClient
+    refiner: LlmRefiner
+    llm_client: LLMRefinementClient | None = None
+
+
+def default_deps() -> PipelineDeps:
+    from app.config import get_settings
+    from app.storage import get_object_bytes
+
+    settings = get_settings()
+    refiner: LlmRefiner = (
+        OpenRouterRefiner(
+            api_key=settings.openrouter_api_key,
+            model=settings.llm_model,
+            base_url=settings.openrouter_base_url,
+        )
+        if settings.openrouter_api_key
+        else NullRefiner()
+    )
+    return PipelineDeps(
+        fetch_bytes=get_object_bytes,
+        textract=textract_module.AwsTextractClient(region_name=settings.aws_region),
+        refiner=refiner,
+        llm_client=get_llm_client(),
+    )
 
 
 class PipelineState(TypedDict, total=False):
     document_id: str
+    path: str
     document_bytes: bytes
-    detected_type: str | None  # DocumentType.value, or "unknown"
-    extracted_fields: dict[str, FieldRecord]
-    validated: dict[str, Any]
+    lines: list[ExtractedLine]
+    outcomes: list[ValidationOutcome]
+    refined_lines: list[int]
 
 
-def _build_graph(
-    db: Session,
-    textract_client: TextractClient,
-    llm_client: LLMRefinementClient,
-):
+def _build_graph(document: Document, db: Session, deps: PipelineDeps, threshold: float) -> Any:
+    """Compile the graph with every node bound to one Document and its deps."""
+
     def classify(state: PipelineState) -> PipelineState:
-        document = db.get(Document, uuid.UUID(state["document_id"]))
-        assert document is not None
+        if document.doc_type == DocumentType.invoice_or_receipt:
+            data = deps.fetch_bytes(document.minio_key)
+            raw_lines = deps.textract.detect_text(data)
+            detected = detect_document_type(raw_lines)
+            if detected != DocumentType.invoice_or_receipt:
+                return {**state, "path": UNKNOWN_PATH}
+            return {**state, "path": INVOICE_PATH, "document_bytes": data}
 
-        if document.content_type in STRUCTURED_CONTENT_TYPES:
-            # File format itself is the classification signal for
-            # CSV/OFX bank statements; no OCR pass needed.
-            state["detected_type"] = document.doc_type.value
-            return state
+        if structured.is_structured(document.filename):
+            return {**state, "path": STRUCTURED_PATH}
+        return {**state, "path": OCR_PATH}
 
-        document_bytes = get_object_bytes(document.minio_key)
-        state["document_bytes"] = document_bytes
-
-        raw_lines = textract_client.detect_text(document_bytes)
-        detected = detect_document_type(raw_lines)
-        state["detected_type"] = detected.value if detected is not None else None
-        return state
-
-    def ocr_extract(state: PipelineState) -> PipelineState:
-        if state.get("detected_type") != DocumentType.invoice_or_receipt.value:
-            # Unknown, or a bank statement (issue #4's path) -- no
-            # invoice/receipt extraction to run.
-            return state
-
-        document_bytes = state.get("document_bytes")
-        if document_bytes is None:
-            return state
-
-        result = textract_client.analyze_expense(document_bytes)
-        fields: dict[str, FieldRecord] = {}
-        for field in result.fields:
-            fields[field.name] = FieldRecord(
-                value=field.value, confidence=field.confidence, method=ExtractionMethod.ocr
-            )
-        state["extracted_fields"] = fields
-        return state
-
-    def llm_refine(state: PipelineState) -> PipelineState:
-        fields = state.get("extracted_fields")
-        if not fields:
-            return state
-
-        document = db.get(Document, uuid.UUID(state["document_id"]))
-        assert document is not None
-        org = db.get(Organization, document.org_id)
-        assert org is not None
-        threshold = float(org.confidence_threshold)
-
-        document_bytes = state.get("document_bytes")
-        assert document_bytes is not None
-
-        for field_name in FIELD_NAMES:
-            current = fields.get(field_name)
-            current_confidence = current["confidence"] if current is not None else 0.0
-            if current_confidence >= threshold:
-                continue
-
-            refined = llm_client.refine_field(
-                field_name,
-                document_bytes,
-                document.content_type,
-                current["value"] if current is not None else None,
-            )
-            fields[field_name] = FieldRecord(
-                value=refined.value, confidence=refined.confidence, method=ExtractionMethod.llm
-            )
-
-        state["extracted_fields"] = fields
-        return state
-
-    def validate(state: PipelineState) -> PipelineState:
-        fields = state.get("extracted_fields")
-        if not fields:
-            return state
-
-        def _to_schema(values: dict[str, str | None]) -> ExtractionSchema:
-            return ExtractionSchema(
-                vendor=values.get("vendor"),
-                amount=values.get("amount"),  # type: ignore[arg-type]
-                invoice_date=values.get("invoice_date"),  # type: ignore[arg-type]
-            )
-
-        raw = {name: fields[name]["value"] for name in fields}
-        try:
-            validated = _to_schema(raw)
-        except ValidationError as exc:
-            invalid_fields = {str(error["loc"][0]) for error in exc.errors()}
-            for name in invalid_fields:
-                if name in fields:
-                    fields[name] = FieldRecord(
-                        value=fields[name]["value"], confidence=0.0, method=fields[name]["method"]
-                    )
-            raw = {name: (None if name in invalid_fields else fields[name]["value"]) for name in fields}
-            validated = _to_schema(raw)
-
-        state["extracted_fields"] = fields
-        state["validated"] = validated.model_dump()
-        return state
-
-    def categorize(state: PipelineState) -> PipelineState:
-        # Category assignment lands in a later ticket; invoice/receipt
-        # Transactions persist with no category for now.
-        return state
-
-    def persist(state: PipelineState) -> PipelineState:
-        document = db.get(Document, uuid.UUID(state["document_id"]))
-        assert document is not None
-
-        detected_type = state.get("detected_type")
-        if detected_type is None:
-            document.status = DocumentStatus.needs_review
-            db.add(
-                AuditLogEntry(
-                    org_id=document.org_id,
-                    actor="system",
-                    action="document.classification_unknown",
-                    entity_type="Document",
-                    entity_id=document.id,
-                    before={"doc_type": document.doc_type.value},
-                    after={"detected_type": None},
-                )
-            )
-            db.commit()
-            return state
-
-        if detected_type != DocumentType.invoice_or_receipt.value:
-            # Bank statement path (issue #4) -- not yet implemented here.
-            db.commit()
-            return state
-
-        fields = state.get("validated") or {}
-        extracted_fields: dict[str, FieldRecord] = state.get("extracted_fields") or {}
-        confidences = {name: record["confidence"] for name, record in extracted_fields.items()}
-        methods = {name: record["method"] for name, record in extracted_fields.items()}
-
-        document_org_id = document.org_id
-        for field_name in FIELD_NAMES:
-            confidence = confidences.get(field_name, 0.0)
-            method = methods.get(field_name, ExtractionMethod.ocr)
-            field_record = extracted_fields.get(field_name)
-            raw_value = field_record["value"] if field_record is not None else None
-            db.add(
-                ExtractionResult(
-                    org_id=document_org_id,
-                    document_id=document.id,
-                    field_name=field_name,
-                    value=raw_value,
-                    confidence=Decimal(str(round(confidence, 3))),
-                    method=method,
-                )
-            )
-
-        org = db.get(Organization, document_org_id)
-        assert org is not None
-        threshold = float(org.confidence_threshold)
-        needs_review = any(confidences.get(name, 0.0) < threshold for name in FIELD_NAMES)
-
-        amount_value = fields.get("amount")
-        try:
-            amount = Decimal(str(amount_value)) if amount_value is not None else None
-        except InvalidOperation:
-            amount = None
-            needs_review = True
-
-        min_confidence = min((confidences.get(name, 0.0) for name in FIELD_NAMES), default=0.0)
-
-        transaction = Transaction(
-            org_id=document_org_id,
-            document_id=document.id,
-            vendor=fields.get("vendor"),
-            amount=amount,
-            transaction_date=fields.get("invoice_date"),
-            confidence=Decimal(str(round(min_confidence, 3))),
-            review_status=ReviewStatus.needs_review if needs_review else ReviewStatus.ok,
-        )
-        db.add(transaction)
-        db.flush()
-
+    def flag_unknown(state: PipelineState) -> PipelineState:
+        document.status = DocumentStatus.needs_review
         db.add(
             AuditLogEntry(
-                org_id=document_org_id,
-                actor="system",
-                action="document.extracted",
-                entity_type="Transaction",
-                entity_id=transaction.id,
-                before=None,
-                after={
-                    "vendor": transaction.vendor,
-                    "amount": str(transaction.amount) if transaction.amount is not None else None,
-                    "transaction_date": (
-                        transaction.transaction_date.isoformat()
-                        if transaction.transaction_date is not None
-                        else None
-                    ),
-                    "review_status": transaction.review_status.value,
-                },
+                org_id=document.org_id,
+                actor=SYSTEM_ACTOR,
+                action="document.classification_unknown",
+                entity_type="document",
+                entity_id=document.id,
+                before={"doc_type": document.doc_type.value},
+                after={"detected_type": None},
             )
         )
         db.commit()
         return state
 
+    def structured_parse(state: PipelineState) -> PipelineState:
+        data = deps.fetch_bytes(document.minio_key)
+        return {**state, "lines": structured.parse_structured(document.filename, data)}
+
+    def ocr_extract(state: PipelineState) -> PipelineState:
+        data = deps.fetch_bytes(document.minio_key)
+        response = deps.textract.analyze_document(data)
+        lines = textract_module.parse_textract_tables(response)
+        if not lines:
+            raise ExtractionFailed("Textract found no statement table in the document")
+        return {**state, "lines": lines}
+
+    def llm_refine(state: PipelineState) -> PipelineState:
+        refined_lines: list[int] = []
+        for line in state.get("lines", []):
+            weak = line.low_confidence_fields(threshold)
+            if not weak:
+                continue
+            replacements = deps.refiner.refine(line, weak)
+            if not replacements:
+                continue
+            line.fields.update(replacements)
+            refined_lines.append(line.line_number)
+        return {**state, "refined_lines": refined_lines}
+
+    def invoice_ocr_extract(state: PipelineState) -> PipelineState:
+        document_bytes = state["document_bytes"]
+        result = deps.textract.analyze_expense(document_bytes)
+        found = {field.name: field for field in result.fields}
+        fields: dict[str, ExtractedField] = {}
+        for name in FIELD_NAMES:
+            match = found.get(name)
+            if match is not None:
+                fields[name] = ExtractedField(value=match.value, confidence=match.confidence, method=ExtractionMethod.ocr)
+            else:
+                # Textract found nothing for this field -- zero confidence,
+                # not "confidently absent", so refinement still targets it.
+                fields[name] = ExtractedField(value=None, confidence=0.0, method=ExtractionMethod.ocr)
+        return {**state, "lines": [ExtractedLine(line_number=1, fields=fields)]}
+
+    def invoice_llm_refine(state: PipelineState) -> PipelineState:
+        lines = state.get("lines", [])
+        if not lines:
+            return state
+        line = lines[0]
+        weak = line.low_confidence_fields(threshold)
+        refined_lines: list[int] = []
+        if weak and deps.llm_client is not None:
+            document_bytes = state["document_bytes"]
+            for field_name in weak:
+                refined = deps.llm_client.refine_field(
+                    field_name, document_bytes, document.content_type, line.value(field_name)
+                )
+                line.fields[field_name] = ExtractedField(
+                    value=refined.value, confidence=refined.confidence, method=ExtractionMethod.llm
+                )
+            refined_lines.append(line.line_number)
+        return {**state, "refined_lines": refined_lines}
+
+    def invoice_validate(state: PipelineState) -> PipelineState:
+        lines = state.get("lines", [])
+        outcomes = [
+            validate_line(line, date_field="invoice_date", description_field="vendor", amount_field="amount")
+            for line in lines
+        ]
+        if lines and not any(outcome.ok for outcome in outcomes):
+            raise ExtractionFailed(
+                "Invoice/receipt failed schema validation: "
+                + "; ".join(o.error or "" for o in outcomes[:3])
+            )
+        return {**state, "outcomes": outcomes}
+
+    def validate(state: PipelineState) -> PipelineState:
+        lines = state.get("lines", [])
+        outcomes = validate_lines(lines)
+        if lines and not any(outcome.ok for outcome in outcomes):
+            raise ExtractionFailed(
+                "No statement line passed schema validation: "
+                + "; ".join(o.error or "" for o in outcomes[:3])
+            )
+        return {**state, "outcomes": outcomes}
+
+    def categorize(state: PipelineState) -> PipelineState:
+        # Category assignment is a later ticket; every Transaction starts
+        # uncategorized and the review UI is where a human picks one.
+        return state
+
+    def persist(state: PipelineState) -> PipelineState:
+        _persist_lines(
+            document=document,
+            db=db,
+            lines=state.get("lines", []),
+            outcomes=state.get("outcomes", []),
+            refined_lines=state.get("refined_lines", []),
+            threshold=threshold,
+            path=state.get("path", OCR_PATH),
+        )
+        return state
+
     graph = StateGraph(PipelineState)
     graph.add_node("classify", classify)
+    graph.add_node("flag_unknown", flag_unknown)
     graph.add_node("ocr_extract", ocr_extract)
     graph.add_node("llm_refine", llm_refine)
+    graph.add_node("invoice_ocr_extract", invoice_ocr_extract)
+    graph.add_node("invoice_llm_refine", invoice_llm_refine)
+    graph.add_node("invoice_validate", invoice_validate)
+    graph.add_node("structured_parse", structured_parse)
     graph.add_node("validate", validate)
     graph.add_node("categorize", categorize)
     graph.add_node("persist", persist)
+
     graph.add_edge(START, "classify")
-    graph.add_edge("classify", "ocr_extract")
+    graph.add_conditional_edges(
+        "classify",
+        lambda state: state.get("path", UNKNOWN_PATH),
+        {
+            OCR_PATH: "ocr_extract",
+            STRUCTURED_PATH: "structured_parse",
+            INVOICE_PATH: "invoice_ocr_extract",
+            UNKNOWN_PATH: "flag_unknown",
+        },
+    )
+    graph.add_edge("flag_unknown", END)
     graph.add_edge("ocr_extract", "llm_refine")
     graph.add_edge("llm_refine", "validate")
+    graph.add_edge("structured_parse", "validate")
+    graph.add_edge("invoice_ocr_extract", "invoice_llm_refine")
+    graph.add_edge("invoice_llm_refine", "invoice_validate")
+    graph.add_edge("invoice_validate", "categorize")
     graph.add_edge("validate", "categorize")
     graph.add_edge("categorize", "persist")
     graph.add_edge("persist", END)
     return graph.compile()
 
 
-def run_pipeline(
-    document_id: uuid.UUID,
-    db: Session,
+def _line_status(line: ExtractedLine, threshold: float) -> TransactionStatus:
+    """A line needs review when any field is still below the threshold.
+
+    Structured-parse lines are all confidence 1.0 and so are always
+    resolved; OCR/LLM lines are only resolved once refinement has brought
+    every field up to the Organization's bar.
+    """
+    if line.low_confidence_fields(threshold):
+        return TransactionStatus.needs_review
+    return TransactionStatus.resolved
+
+
+def _persist_lines(
     *,
-    textract_client: TextractClient | None = None,
-    llm_client: LLMRefinementClient | None = None,
-) -> Document:
-    """Drive a Document through the pipeline: queued -> processing -> done
-    (or `needs_review` if classify_document can't place it -- see AC1).
+    document: Document,
+    db: Session,
+    lines: list[ExtractedLine],
+    outcomes: list[ValidationOutcome],
+    refined_lines: list[int],
+    threshold: float,
+    path: str,
+) -> None:
+    by_line_number = {line.line_number: line for line in lines}
+    created: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+
+    for outcome in outcomes:
+        raw = by_line_number.get(outcome.line_number)
+        if raw is None:
+            continue
+        if outcome.line is None:
+            # Kept out of the database but never silently dropped: the
+            # rejection and its reason go into the Document's audit entry.
+            rejected.append({"line_number": outcome.line_number, "error": outcome.error})
+            continue
+
+        transaction = Transaction(
+            org_id=document.org_id,
+            document_id=document.id,
+            line_number=outcome.line.line_number,
+            txn_date=outcome.line.txn_date,
+            description=outcome.line.description,
+            amount=outcome.line.amount,
+            confidence=raw.min_confidence,
+            status=_line_status(raw, threshold),
+        )
+        db.add(transaction)
+        db.flush()
+
+        db.add(
+            ExtractionResult(
+                org_id=document.org_id,
+                document_id=document.id,
+                transaction_id=transaction.id,
+                line_number=raw.line_number,
+                method=raw.weakest_method,
+                confidence=raw.min_confidence,
+                fields=raw.to_json(),
+            )
+        )
+        db.add(
+            AuditLogEntry(
+                org_id=document.org_id,
+                actor=SYSTEM_ACTOR,
+                action="transaction.extracted",
+                entity_type="transaction",
+                entity_id=transaction.id,
+                before=None,
+                after={
+                    "document_id": str(document.id),
+                    "line_number": transaction.line_number,
+                    "txn_date": transaction.txn_date.isoformat(),
+                    "description": transaction.description,
+                    "amount": str(transaction.amount),
+                    "confidence": transaction.confidence,
+                    "status": transaction.status.value,
+                    "fields": raw.to_json(),
+                },
+            )
+        )
+        created.append({"transaction_id": str(transaction.id), "line_number": transaction.line_number})
+
+    db.add(
+        AuditLogEntry(
+            org_id=document.org_id,
+            actor=SYSTEM_ACTOR,
+            action="document.extracted",
+            entity_type="document",
+            entity_id=document.id,
+            before={"status": DocumentStatus.processing.value},
+            after={
+                "path": path,
+                "confidence_threshold": threshold,
+                "lines_found": len(lines),
+                "transactions_created": len(created),
+                "refined_lines": refined_lines,
+                "rejected_lines": rejected,
+            },
+        )
+    )
+    db.flush()
+
+
+def derive_document_status(transactions: list[Transaction]) -> DocumentStatus:
+    """A Document's status is an aggregate of its Transactions' statuses.
+
+    `done` only once every Transaction is resolved; a single Transaction
+    needing review pulls the whole Document to `needs_review`. A Document
+    with no Transactions (a failed/rejected extraction with nothing
+    persisted) has nothing outstanding, so it is done.
+    """
+    if any(t.status == TransactionStatus.needs_review for t in transactions):
+        return DocumentStatus.needs_review
+    return DocumentStatus.done
+
+
+def run_pipeline(document_id: uuid.UUID, db: Session, deps: PipelineDeps | None = None) -> Document:
+    """Drive one Document through extraction and return it, status updated.
 
     Callable directly (no HTTP, no Celery) so it can be exercised as a
-    pipeline-as-a-function unit test, and reused by the Celery task.
-    `textract_client`/`llm_client` default to the real AWS/LiteLLM-backed
-    clients; tests inject fakes so no live credentials are ever required.
+    pipeline-as-a-function test, and reused by the Celery task.
+    `deps` defaults to the real AWS/OpenRouter/LiteLLM-backed clients; tests
+    inject fakes so no live credentials are ever required.
     """
     document = db.get(Document, document_id)
     if document is None:
@@ -315,24 +415,26 @@ def run_pipeline(
     document.status = DocumentStatus.processing
     db.commit()
 
-    graph = _build_graph(
-        db,
-        textract_client if textract_client is not None else get_textract_client(),
-        llm_client if llm_client is not None else get_llm_client(),
-    )
+    organization = db.get(Organization, document.org_id)
+    threshold = float(organization.confidence_threshold) if organization is not None else 0.8
+
+    if deps is None:
+        deps = default_deps()
 
     try:
-        graph.invoke({"document_id": str(document_id)})
+        _build_graph(document, db, deps, threshold).invoke({"document_id": str(document_id)})
     except Exception:
-        document.status = DocumentStatus.failed
-        db.commit()
+        db.rollback()
+        failed = db.get(Document, document_id)
+        if failed is not None:
+            failed.status = DocumentStatus.failed
+            db.commit()
         raise
 
-    db.refresh(document)
-    if document.status == DocumentStatus.processing:
-        # persist() left status alone (bank-statement passthrough, or an
-        # invoice/receipt path that ran to completion) -> done.
-        document.status = DocumentStatus.done
+    if document.status != DocumentStatus.needs_review:
+        # Anything other than flag_unknown (which already set and committed
+        # needs_review itself) derives status from what actually persisted.
+        document.status = derive_document_status(list(document.transactions))
         db.commit()
-        db.refresh(document)
+    db.refresh(document)
     return document

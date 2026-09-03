@@ -1,13 +1,16 @@
 import enum
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date as date_type
+from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import (
     BigInteger,
     Date,
     DateTime,
     Enum,
+    Float,
     ForeignKey,
     Numeric,
     String,
@@ -41,11 +44,12 @@ class Organization(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    # Minimum acceptable per-field extraction confidence (0-1) before a field
-    # is sent through llm_refine as a second pass. Owner-configurable; see
-    # PATCH /orgs/me/settings.
+    # Minimum acceptable per-field/per-line extraction confidence (0-1)
+    # below which a field is sent through llm_refine for a second pass; a
+    # field still low afterwards flags its Transaction for human review.
+    # Owner-configurable, see PATCH /orgs/me/settings.
     confidence_threshold: Mapped[Decimal] = mapped_column(
-        Numeric(3, 2), default=DEFAULT_CONFIDENCE_THRESHOLD, nullable=False
+        Numeric(3, 2), nullable=False, default=DEFAULT_CONFIDENCE_THRESHOLD, server_default="0.80"
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
 
@@ -91,20 +95,45 @@ class DocumentType(str, enum.Enum):
 class DocumentStatus(str, enum.Enum):
     queued = "queued"
     processing = "processing"
+    # Pipeline ran to completion but either classify_document could not
+    # confidently place the Document as invoice/receipt or bank statement
+    # (issue #3, AC1), or at least one of its Transactions needs a human
+    # look (issue #4, AC4) -- flagged rather than silently misprocessed.
+    needs_review = "needs_review"
     done = "done"
     failed = "failed"
-    # Pipeline ran to completion but classify_document could not confidently
-    # place the Document as invoice/receipt or bank statement -- flagged
-    # rather than silently misprocessed (issue #3, AC1).
+
+
+class TransactionStatus(str, enum.Enum):
+    """Review state of a single extracted line.
+
+    `resolved` means every field on the line cleared the Organization's
+    confidence threshold (or came from a structured parse, which is exact
+    by definition); `needs_review` is the flag a human clears in the review
+    UI.
+    """
+
     needs_review = "needs_review"
+    resolved = "resolved"
+
+
+class ExtractionMethod(str, enum.Enum):
+    """Which mechanism produced a field/line -- the audit-trail provenance.
+
+    `structured_parse` is CSV/OFX, which is machine-readable to begin with
+    and therefore always confidence 1.0 (see CONTEXT.md, ExtractionResult).
+    """
+
+    ocr = "ocr"
+    llm = "llm"
+    structured_parse = "structured_parse"
 
 
 class Document(Base):
     """A source file uploaded by a user (invoice, receipt, or bank statement).
 
     Stored in MinIO under `minio_key`; `status` tracks progress through the
-    (currently stub) extraction pipeline. See CONTEXT.md for the full
-    domain definition.
+    extraction pipeline. See CONTEXT.md for the full domain definition.
     """
 
     __tablename__ = "documents"
@@ -126,88 +155,107 @@ class Document(Base):
         DateTime(timezone=True), default=_now, onupdate=_now, nullable=False
     )
 
-
-class ExtractionMethod(str, enum.Enum):
-    ocr = "ocr"
-    llm = "llm"
-    structured_parse = "structured_parse"
-
-
-class ReviewStatus(str, enum.Enum):
-    ok = "ok"
-    needs_review = "needs_review"
-
-
-class ExtractionResult(Base):
-    """One per-field extraction outcome for a Document.
-
-    Every Document produces at least one ExtractionResult row per extracted
-    field, regardless of which method produced it -- this keeps "which field
-    came from where" uniform for the audit trail (see CONTEXT.md).
-    """
-
-    __tablename__ = "extraction_results"
-
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
-    org_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False
+    transactions: Mapped[list["Transaction"]] = relationship(
+        back_populates="document", cascade="all, delete-orphan", order_by="Transaction.line_number"
     )
-    document_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("documents.id"), nullable=False
-    )
-    field_name: Mapped[str] = mapped_column(String(64), nullable=False)
-    value: Mapped[str | None] = mapped_column(String(1024), nullable=True)
-    confidence: Mapped[Decimal] = mapped_column(Numeric(4, 3), nullable=False)
-    method: Mapped[ExtractionMethod] = mapped_column(
-        Enum(ExtractionMethod, name="extraction_method"), nullable=False
-    )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
 
 
 class Transaction(Base):
-    """A single normalized line item extracted from a Document.
+    """One normalized line item extracted from a Document.
 
-    An invoice/receipt Document produces exactly one Transaction (issue #3);
-    a multi-line bank statement produces many (issue #4). See CONTEXT.md.
+    An invoice/receipt Document yields exactly one Transaction -- always
+    `line_number` 1, `description` holding the vendor name and `txn_date`
+    the invoice date (issue #3). A bank statement yields one per statement
+    line, in order (issue #4). Amount sign carries direction: negative is
+    money out, positive money in.
     """
 
     __tablename__ = "transactions"
+    __table_args__ = (
+        UniqueConstraint("document_id", "line_number", name="uq_transactions_document_line"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
     org_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False, index=True
     )
     document_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("documents.id"), nullable=False
+        UUID(as_uuid=True), ForeignKey("documents.id"), nullable=False, index=True
     )
-    vendor: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
-    transaction_date: Mapped[date | None] = mapped_column(Date, nullable=True)
-    # Overall confidence for this Transaction -- the minimum per-field
-    # confidence among its ExtractionResults.
-    confidence: Mapped[Decimal | None] = mapped_column(Numeric(4, 3), nullable=True)
-    review_status: Mapped[ReviewStatus] = mapped_column(
-        Enum(ReviewStatus, name="review_status"), nullable=False, default=ReviewStatus.ok
+    line_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    txn_date: Mapped[date_type] = mapped_column(Date, nullable=False)
+    description: Mapped[str] = mapped_column(String(512), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    status: Mapped[TransactionStatus] = mapped_column(
+        Enum(TransactionStatus, name="transaction_status"), nullable=False
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now, nullable=False
     )
 
+    document: Mapped["Document"] = relationship(back_populates="transactions")
+    extraction_results: Mapped[list["ExtractionResult"]] = relationship(
+        back_populates="transaction", cascade="all, delete-orphan"
+    )
+
+
+class ExtractionResult(Base):
+    """Raw per-line extraction output for one line of one Document.
+
+    `fields` is `{field_name: {value, confidence, method}}` so the origin of
+    every single field is recoverable regardless of ingestion path; `method`
+    and `confidence` on the row itself summarize the line as a whole (the
+    weakest field's method/confidence). An invoice/receipt Document has
+    exactly one row (`line_number` 1, fields named `date`/`description`/
+    `amount` the same as a bank-statement line -- see app/pipeline.py); a
+    bank statement has one row per statement line.
+    """
+
+    __tablename__ = "extraction_results"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False, index=True
+    )
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("documents.id"), nullable=False, index=True
+    )
+    transaction_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("transactions.id"), nullable=True
+    )
+    line_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    method: Mapped[ExtractionMethod] = mapped_column(
+        Enum(ExtractionMethod, name="extraction_method"), nullable=False
+    )
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    fields: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+
+    transaction: Mapped["Transaction | None"] = relationship(back_populates="extraction_results")
+
 
 class AuditLogEntry(Base):
-    """An immutable record of a system or user action, for the audit trail."""
+    """An append-only record of who changed what, when.
+
+    Pipeline actions record actor `system`; user edits record the acting
+    user's id (see CONTEXT.md, Manual match).
+    """
 
     __tablename__ = "audit_log_entries"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
     org_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False, index=True
     )
     actor: Mapped[str] = mapped_column(String(255), nullable=False, default="system")
-    action: Mapped[str] = mapped_column(String(128), nullable=False)
+    action: Mapped[str] = mapped_column(String(255), nullable=False)
     entity_type: Mapped[str] = mapped_column(String(64), nullable=False)
-    entity_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    before: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    after: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    entity_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    before: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    after: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+
+
+SYSTEM_ACTOR = "system"

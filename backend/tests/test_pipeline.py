@@ -1,3 +1,11 @@
+"""Pipeline-as-a-function tests for the invoice/receipt path (issue #3).
+
+Drives the real graph -- classify, the real Textract-response mapping, the
+real schema validation and the real persistence -- with fakes only at the
+three network boundaries (object storage, Textract, the vision LLM). No AWS
+or LLM credentials are needed or used.
+"""
+
 import uuid
 
 from app.extraction.llm import RefinedField
@@ -10,10 +18,10 @@ from app.models import (
     ExtractionMethod,
     ExtractionResult,
     Organization,
-    ReviewStatus,
     Transaction,
+    TransactionStatus,
 )
-from app.pipeline import run_pipeline
+from app.pipeline import PipelineDeps, run_pipeline
 
 FAKE_PDF_BYTES = b"%PDF-1.4 fake invoice bytes for testing"
 
@@ -34,6 +42,9 @@ class FakeTextractClient:
         self.analyze_expense_calls += 1
         return TextractExpenseResult(fields=self._expense_fields)
 
+    def analyze_document(self, document_bytes: bytes):  # pragma: no cover - not used on this path
+        raise AssertionError("invoice/receipt path never calls analyze_document")
+
 
 class FakeLLMClient:
     """Returns a canned refinement and records which fields were asked for."""
@@ -45,6 +56,17 @@ class FakeLLMClient:
     def refine_field(self, field_name, document_bytes, content_type, current_value):
         self.refined_fields.append(field_name)
         return self._refinements[field_name]
+
+
+def _deps(textract: FakeTextractClient, llm: FakeLLMClient) -> PipelineDeps:
+    from app.extraction.llm import NullRefiner
+
+    return PipelineDeps(
+        fetch_bytes=lambda key: FAKE_PDF_BYTES,
+        textract=textract,
+        refiner=NullRefiner(),  # the bank-statement text refiner; unused here
+        llm_client=llm,
+    )
 
 
 def _make_org(db_session, confidence_threshold: str = "0.80") -> Organization:
@@ -80,9 +102,7 @@ def test_pipeline_raises_for_unknown_document(db_session):
         pass
 
 
-def test_fully_confident_extraction_persists_without_refinement(db_session, monkeypatch):
-    monkeypatch.setattr("app.pipeline.get_object_bytes", lambda key: FAKE_PDF_BYTES)
-
+def test_fully_confident_extraction_persists_without_refinement(db_session):
     org = _make_org(db_session)
     document = _make_document(db_session, org)
 
@@ -96,30 +116,32 @@ def test_fully_confident_extraction_persists_without_refinement(db_session, monk
     )
     llm = FakeLLMClient(refinements={})
 
-    result = run_pipeline(document.id, db_session, textract_client=textract, llm_client=llm)
+    result = run_pipeline(document.id, db_session, _deps(textract, llm))
 
     assert result.status == DocumentStatus.done
     assert llm.refined_fields == []  # no field was below threshold
 
     transaction = db_session.query(Transaction).filter_by(document_id=document.id).one()
-    assert transaction.vendor == "Vendor Co"
+    assert transaction.description == "Vendor Co"
     assert str(transaction.amount) == "123.45"
-    assert transaction.transaction_date.isoformat() == "2026-01-01"
-    assert transaction.review_status == ReviewStatus.ok
+    assert transaction.txn_date.isoformat() == "2026-01-01"
+    assert transaction.status == TransactionStatus.resolved
 
     extraction_results = (
         db_session.query(ExtractionResult).filter_by(document_id=document.id).all()
     )
-    assert {r.field_name for r in extraction_results} == {"vendor", "amount", "invoice_date"}
-    assert all(r.method == ExtractionMethod.ocr for r in extraction_results)
+    assert len(extraction_results) == 1
+    result_row = extraction_results[0]
+    assert result_row.line_number == 1
+    assert result_row.transaction_id == transaction.id
+    assert result_row.method == ExtractionMethod.ocr
+    assert set(result_row.fields) == {"vendor", "amount", "invoice_date"}
 
     audit_entries = db_session.query(AuditLogEntry).filter_by(org_id=org.id).all()
     assert any(entry.action == "document.extracted" and entry.actor == "system" for entry in audit_entries)
 
 
-def test_low_confidence_field_triggers_llm_refinement_and_is_logged(db_session, monkeypatch):
-    monkeypatch.setattr("app.pipeline.get_object_bytes", lambda key: FAKE_PDF_BYTES)
-
+def test_low_confidence_field_triggers_llm_refinement_and_is_logged(db_session):
     org = _make_org(db_session, confidence_threshold="0.80")
     document = _make_document(db_session, org)
 
@@ -131,36 +153,28 @@ def test_low_confidence_field_triggers_llm_refinement_and_is_logged(db_session, 
             ExtractedField(name="invoice_date", value="2026-01-01", confidence=0.95),
         ],
     )
-    llm = FakeLLMClient(
-        refinements={"vendor": RefinedField(value="Vendor Co", confidence=0.70)}
-    )
+    llm = FakeLLMClient(refinements={"vendor": RefinedField(value="Vendor Co", confidence=0.70)})
 
-    result = run_pipeline(document.id, db_session, textract_client=textract, llm_client=llm)
+    result = run_pipeline(document.id, db_session, _deps(textract, llm))
 
-    assert result.status == DocumentStatus.done
+    assert result.status == DocumentStatus.needs_review
     assert llm.refined_fields == ["vendor"]  # only the low-confidence field was refined
 
     transaction = db_session.query(Transaction).filter_by(document_id=document.id).one()
-    assert transaction.vendor == "Vendor Co"
+    assert transaction.description == "Vendor Co"
     # LLM refined it, but 0.70 is still below the 0.80 threshold -> flagged.
-    assert transaction.review_status == ReviewStatus.needs_review
+    assert transaction.status == TransactionStatus.needs_review
 
-    vendor_result = (
-        db_session.query(ExtractionResult)
-        .filter_by(document_id=document.id, field_name="vendor")
-        .one()
-    )
-    assert vendor_result.method == ExtractionMethod.llm
-    assert float(vendor_result.confidence) == 0.70
+    extraction_result = db_session.query(ExtractionResult).filter_by(document_id=document.id).one()
+    assert extraction_result.fields["vendor"]["method"] == ExtractionMethod.llm.value
+    assert extraction_result.fields["vendor"]["confidence"] == 0.70
 
     audit_entries = db_session.query(AuditLogEntry).filter_by(org_id=org.id).all()
     extracted_entry = next(e for e in audit_entries if e.action == "document.extracted")
-    assert extracted_entry.after["review_status"] == "needs_review"
+    assert extracted_entry.after["refined_lines"] == [1]
 
 
-def test_unknown_document_is_flagged_and_not_persisted_as_a_transaction(db_session, monkeypatch):
-    monkeypatch.setattr("app.pipeline.get_object_bytes", lambda key: FAKE_PDF_BYTES)
-
+def test_unknown_document_is_flagged_and_not_persisted_as_a_transaction(db_session):
     org = _make_org(db_session)
     document = _make_document(db_session, org)
 
@@ -168,10 +182,10 @@ def test_unknown_document_is_flagged_and_not_persisted_as_a_transaction(db_sessi
     textract = FakeTextractClient(lines=["random unrelated text", "nothing recognizable"], expense_fields=[])
     llm = FakeLLMClient(refinements={})
 
-    result = run_pipeline(document.id, db_session, textract_client=textract, llm_client=llm)
+    result = run_pipeline(document.id, db_session, _deps(textract, llm))
 
     assert result.status == DocumentStatus.needs_review
-    assert textract.analyze_expense_calls == 0  # never reached ocr_extract
+    assert textract.analyze_expense_calls == 0  # never reached invoice_ocr_extract
 
     assert db_session.query(Transaction).filter_by(document_id=document.id).count() == 0
     assert db_session.query(ExtractionResult).filter_by(document_id=document.id).count() == 0

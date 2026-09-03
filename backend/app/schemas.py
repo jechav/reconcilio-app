@@ -4,7 +4,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel, EmailStr, Field
 
-from app.models import DocumentStatus, DocumentType, ExtractionMethod, OrgRole, ReviewStatus
+from app.models import DocumentStatus, DocumentType, ExtractionMethod, OrgRole, TransactionStatus
 
 
 class SignupRequest(BaseModel):
@@ -91,10 +91,12 @@ class DocumentUploadResponse(BaseModel):
 
 class ExtractionResultOut(BaseModel):
     id: uuid.UUID
-    field_name: str
-    value: str | None
-    confidence: Decimal
+    document_id: uuid.UUID
+    transaction_id: uuid.UUID | None
+    line_number: int
     method: ExtractionMethod
+    confidence: float
+    fields: dict[str, object]
 
     model_config = {"from_attributes": True}
 
@@ -102,10 +104,11 @@ class ExtractionResultOut(BaseModel):
 class TransactionOut(BaseModel):
     id: uuid.UUID
     document_id: uuid.UUID
-    vendor: str | None
-    amount: Decimal | None
-    transaction_date: date | None
-    confidence: Decimal | None
-    review_status: ReviewStatus
+    line_number: int
+    description: str
+    amount: Decimal
+    txn_date: date
+    confidence: float
+    status: TransactionStatus
 
     model_config = {"from_attributes": True}

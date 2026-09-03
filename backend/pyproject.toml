@@ -21,6 +21,7 @@ dependencies = [
     "minio>=7.2",
     "langgraph>=0.2",
     "boto3>=1.43.86",
+    "httpx>=0.27",
     "litellm>=1.99.0",
 ]
 
