@@ -20,6 +20,8 @@ dependencies = [
     "email-validator>=2.2",
     "minio>=7.2",
     "langgraph>=0.2",
+    "boto3>=1.43.86",
+    "litellm>=1.99.0",
 ]
 
 [dependency-groups]
@@ -38,6 +40,14 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "minio.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "boto3.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "litellm.*"
 ignore_missing_imports = true
 
 [build-system]

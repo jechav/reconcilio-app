@@ -75,3 +75,16 @@ def presigned_get_url(key: str) -> str:
     settings = get_settings()
     client = get_public_minio_client()
     return client.presigned_get_object(settings.minio_bucket, key, expires=PRESIGNED_URL_EXPIRY)
+
+
+def get_object_bytes(key: str) -> bytes:
+    """Read one object's full contents (the pipeline needs the file bytes
+    in-process to hand to Textract/the LLM refinement client)."""
+    settings = get_settings()
+    client = get_minio_client()
+    response = client.get_object(settings.minio_bucket, key)
+    try:
+        return response.read()
+    finally:
+        response.close()
+        response.release_conn()

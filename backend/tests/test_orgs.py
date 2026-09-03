@@ -78,3 +78,96 @@ def test_members_endpoint_requires_auth(client):
     response = client.get("/orgs/me/members")
 
     assert response.status_code == 401
+
+
+def test_owner_can_configure_confidence_threshold(client, unique_email):
+    owner = _signup(client, unique_email)
+    assert owner["organization"]["confidence_threshold"] == "0.80"
+
+    response = client.patch(
+        "/orgs/me/settings",
+        json={"confidence_threshold": "0.90"},
+        headers=_auth_headers(owner["access_token"]),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["confidence_threshold"] == "0.90"
+
+
+def test_non_owner_cannot_configure_confidence_threshold(client, unique_email):
+    owner = _signup(client, unique_email)
+    invitee_email = f"invitee-{unique_email}"
+    owner_headers = _auth_headers(owner["access_token"])
+    client.post("/orgs/me/members", json={"email": invitee_email, "role": "admin"}, headers=owner_headers)
+    accepted = client.post(
+        "/auth/accept-invite", json={"email": invitee_email, "password": "correct-horse"}
+    )
+    admin_headers = _auth_headers(accepted.json()["access_token"])
+
+    response = client.patch(
+        "/orgs/me/settings", json={"confidence_threshold": "0.90"}, headers=admin_headers
+    )
+
+    assert response.status_code == 403
+
+
+def test_confidence_threshold_is_actually_used_by_the_pipeline(client, db_session, unique_email, monkeypatch):
+    import uuid
+    from decimal import Decimal
+
+    from app.extraction.llm import RefinedField
+    from app.extraction.textract import ExtractedField, TextractExpenseResult
+    from app.models import Document, DocumentStatus, DocumentType, Organization, Transaction
+    from app.pipeline import run_pipeline
+
+    owner = _signup(client, unique_email)
+    org_id = uuid.UUID(owner["organization"]["id"])
+
+    # Lower the threshold so a 0.60-confidence field counts as good enough.
+    client.patch(
+        "/orgs/me/settings",
+        json={"confidence_threshold": "0.50"},
+        headers=_auth_headers(owner["access_token"]),
+    )
+    db_session.expire_all()
+    org = db_session.get(Organization, org_id)
+    assert org is not None
+    assert org.confidence_threshold == Decimal("0.50")
+
+    document = Document(
+        org_id=org_id,
+        filename="invoice.pdf",
+        content_type="application/pdf",
+        size_bytes=10,
+        minio_key=f"{org_id}/{uuid.uuid4()}-invoice.pdf",
+        doc_type=DocumentType.invoice_or_receipt,
+        status=DocumentStatus.queued,
+    )
+    db_session.add(document)
+    db_session.commit()
+    db_session.refresh(document)
+
+    class _Textract:
+        def detect_text(self, document_bytes):
+            return ["INVOICE", "TOTAL", "Vendor Co"]
+
+        def analyze_expense(self, document_bytes):
+            return TextractExpenseResult(
+                fields=[
+                    ExtractedField(name="vendor", value="Vendor Co", confidence=0.60),
+                    ExtractedField(name="amount", value="10.00", confidence=0.95),
+                    ExtractedField(name="invoice_date", value="2026-01-01", confidence=0.95),
+                ]
+            )
+
+    class _LLM:
+        def refine_field(self, field_name, document_bytes, content_type, current_value):
+            raise AssertionError("llm_refine should not run: 0.60 clears the 0.50 threshold")
+
+    monkeypatch.setattr("app.pipeline.get_object_bytes", lambda key: b"%PDF-1.4 fake")
+
+    result = run_pipeline(document.id, db_session, textract_client=_Textract(), llm_client=_LLM())
+
+    assert result.status == DocumentStatus.done
+    transaction = db_session.query(Transaction).filter_by(document_id=document.id).one()
+    assert transaction.review_status.value == "ok"
