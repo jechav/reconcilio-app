@@ -160,3 +160,42 @@ class CategoryUpdateRequest(BaseModel):
 
 class TransactionCategoryCorrectionRequest(BaseModel):
     category_id: uuid.UUID
+
+
+class CategorySummaryOut(BaseModel):
+    """One Category's income/expense picture for a dashboard date range
+    (issue #8, AC1). `category_id` is `None` for Transactions with no
+    Category assigned -- grouped under `category_name` "Uncategorized"
+    rather than dropped."""
+
+    category_id: uuid.UUID | None
+    category_name: str
+    income: Decimal
+    expenses: Decimal
+    transaction_count: int
+
+
+class DashboardSummaryOut(BaseModel):
+    """Cash-basis income/expense summary grouped by Category, for an
+    arbitrary user-selected date range (issue #8, AC1/AC2). `start_date`/
+    `end_date` are ad-hoc filters, not a stored Period (see CONTEXT.md,
+    Period)."""
+
+    start_date: date
+    end_date: date
+    income_total: Decimal
+    expenses_total: Decimal
+    net_total: Decimal
+    categories: list[CategorySummaryOut]
+
+
+class DashboardFlagsOut(BaseModel):
+    """Missing-documentation flags for a date range: bank/expense-source
+    Transactions that never reconciled (issue #8, AC3). Each Transaction
+    carries `document_id`, letting a caller drill down to the source
+    Document (AC4)."""
+
+    start_date: date
+    end_date: date
+    unmatched_bank_transactions: list[TransactionOut]
+    unmatched_expense_transactions: list[TransactionOut]

@@ -6,6 +6,7 @@ from app.logging_config import configure_logging
 from app.routers import (
     auth,
     categories,
+    dashboard,
     documents,
     health,
     orgs,
@@ -34,3 +35,4 @@ app.include_router(documents.router)
 app.include_router(reconciliation.router)
 app.include_router(categories.router)
 app.include_router(transactions.router)
+app.include_router(dashboard.router)
