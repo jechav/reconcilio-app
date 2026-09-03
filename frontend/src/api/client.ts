@@ -200,3 +200,44 @@ export function getDashboardFlags(
   const params = new URLSearchParams({ start_date: startDate, end_date: endDate });
   return getJson<DashboardFlagsOut>(`/dashboard/flags?${params.toString()}`, token);
 }
+
+export type ExportFormat = "csv" | "json";
+
+export interface ExportDownload {
+  blob: Blob;
+  filename: string;
+}
+
+function filenameFromContentDisposition(header: string | null, fallback: string): string {
+  if (!header) {
+    return fallback;
+  }
+  const match = /filename="?([^"]+)"?/.exec(header);
+  return match ? match[1] : fallback;
+}
+
+/** Downloads every Transaction in a date range as CSV or JSON, for an
+ * accountant or tax software (issue #9). Every Transaction in range comes
+ * back regardless of processing state, with `category`, `review_status`,
+ * and `match_status` columns -- see backend/app/routers/export.py. */
+export async function exportTransactions(
+  token: string,
+  startDate: string,
+  endDate: string,
+  format: ExportFormat,
+): Promise<ExportDownload> {
+  const params = new URLSearchParams({ start_date: startDate, end_date: endDate, format });
+  const path = `/export/transactions?${params.toString()}`;
+  const response = await fetch(`${API_URL}${path}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) {
+    throw new ApiError(await parseErrorDetail(response, path));
+  }
+  const blob = await response.blob();
+  const filename = filenameFromContentDisposition(
+    response.headers.get("Content-Disposition"),
+    `transactions_${startDate}_${endDate}.${format}`,
+  );
+  return { blob, filename };
+}
