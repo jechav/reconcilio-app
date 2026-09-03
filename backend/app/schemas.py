@@ -136,6 +136,15 @@ class CategoryOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class LlmUsageOut(BaseModel):
+    """One (provider, model) total for the calling Organization -- see
+    app/llm_usage.py (issue #7, AC5)."""
+
+    provider: str
+    model: str
+    calls: int
+
+
 class ManualMatchRequest(BaseModel):
     bank_transaction_id: uuid.UUID
     expense_transaction_id: uuid.UUID

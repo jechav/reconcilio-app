@@ -379,4 +379,54 @@ class ReconciliationMatch(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
 
 
+class LlmUsage(Base):
+    """One row per LLM refinement call, for per-tenant cost/usage tracking
+    (issue #7, AC5). `provider`/`model` identify which refiner made the
+    call (`openrouter` for the bank-statement line refiner, `litellm` for
+    the invoice/receipt vision refiner -- see app/extraction/llm.py);
+    `NullRefiner`/no-op paths never write a row since no call was actually
+    made. Insert-only and intentionally coarse (no prompt/response content
+    -- only counts) so it carries no PII. Aggregate with a `GROUP BY org_id,
+    provider, model` query (see app/llm_usage.py) for a per-Organization
+    total.
+    """
+
+    __tablename__ = "llm_usage"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False, index=True
+    )
+    document_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("documents.id"), nullable=True
+    )
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    model: Mapped[str] = mapped_column(String(255), nullable=False)
+    calls: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+
+
+class DeadLetterTask(Base):
+    """A Celery task that failed repeatedly for the same Document and was
+    routed here instead of retrying forever or vanishing silently (issue
+    #7, AC2). Insert-only, queryable per Document/Organization for
+    operational visibility; `error` is the exception message only -- never
+    raw document bytes or extracted field values.
+    """
+
+    __tablename__ = "dead_letter_tasks"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    org_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=True, index=True
+    )
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("documents.id"), nullable=False, index=True
+    )
+    task_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    error: Mapped[str] = mapped_column(String(2000), nullable=False)
+    attempts: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+
+
 SYSTEM_ACTOR = "system"

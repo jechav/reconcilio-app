@@ -28,6 +28,7 @@ network boundaries.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, TypedDict
@@ -49,6 +50,7 @@ from app.extraction.llm import LlmRefiner, LLMRefinementClient, NullRefiner, Ope
 from app.extraction.textract import FIELD_NAMES, TextractClient
 from app.extraction.types import ExtractedField, ExtractedLine
 from app.extraction.validation import ValidationOutcome, validate_line, validate_lines
+from app.llm_usage import record_llm_call
 from app.models import (
     SYSTEM_ACTOR,
     AuditLogEntry,
@@ -65,6 +67,15 @@ from app.models import (
 )
 from app.reconciliation import run_reconciliation_for_document
 from app.scoping import org_scoped_select
+
+logger = logging.getLogger("reconcilio.pipeline")
+
+#: A Document in one of these statuses already ran the pipeline to
+#: completion -- issue #7 AC3/AC6: a retried/redelivered `process_document`
+#: task for the same Document must not re-run extraction and risk duplicate
+#: Transaction/ExtractionResult rows. `failed` is deliberately excluded: a
+#: prior failed attempt is exactly what a retry exists to redo.
+_TERMINAL_STATUSES = frozenset({DocumentStatus.done, DocumentStatus.needs_review})
 
 OCR_PATH = "ocr"
 STRUCTURED_PATH = "structured"
@@ -198,6 +209,7 @@ def _build_graph(
             if not weak:
                 continue
             replacements = deps.refiner.refine(line, weak)
+            _record_refiner_usage(db, document, deps.refiner)
             if not replacements:
                 continue
             line.fields.update(replacements)
@@ -232,6 +244,7 @@ def _build_graph(
                 refined = deps.llm_client.refine_field(
                     field_name, document_bytes, document.content_type, line.value(field_name)
                 )
+                _record_refiner_usage(db, document, deps.llm_client)
                 line.fields[field_name] = ExtractedField(
                     value=refined.value, confidence=refined.confidence, method=ExtractionMethod.llm
                 )
@@ -320,6 +333,20 @@ def _build_graph(
     return graph.compile()
 
 
+def _record_refiner_usage(db: Session, document: Document, refiner: object) -> None:
+    """Record one LlmUsage row for a real refiner call (issue #7, AC5).
+
+    `NullRefiner`/`llm_client is None` never reach this -- only a refiner
+    with a `PROVIDER` set (OpenRouterRefiner, LiteLLMRefinementClient, or a
+    test fake opting in) made an actual, billable call.
+    """
+    provider = getattr(refiner, "PROVIDER", None)
+    if provider is None:
+        return
+    model = getattr(refiner, "model", "unknown")
+    record_llm_call(db, org_id=document.org_id, document_id=document.id, provider=provider, model=model)
+
+
 def _line_status(line: ExtractedLine, threshold: float) -> TransactionStatus:
     """A line needs review when any field is still below the threshold.
 
@@ -351,6 +378,26 @@ def _persist_lines(
     category_names = [category.name for category in categories]
     category_id_by_name = {category.name: category.id for category in categories}
 
+    # Existing rows for this Document, keyed by line_number -- defense in
+    # depth for idempotency (issue #7, AC3/AC6) beyond the terminal-status
+    # short-circuit in run_pipeline: if persist is ever re-entered for a
+    # Document that already has rows for a line (e.g. a task retried after
+    # its commit succeeded but before the retry was cancelled), this updates
+    # those rows in place instead of violating the unique
+    # (document_id, line_number) constraint with a duplicate insert.
+    existing_transactions = {
+        t.line_number: t
+        for t in db.execute(
+            select(Transaction).where(Transaction.document_id == document.id)
+        ).scalars()
+    }
+    existing_results = {
+        r.line_number: r
+        for r in db.execute(
+            select(ExtractionResult).where(ExtractionResult.document_id == document.id)
+        ).scalars()
+    }
+
     for outcome in outcomes:
         raw = by_line_number.get(outcome.line_number)
         if raw is None:
@@ -361,30 +408,27 @@ def _persist_lines(
             rejected.append({"line_number": outcome.line_number, "error": outcome.error})
             continue
 
-        transaction = Transaction(
-            org_id=document.org_id,
-            document_id=document.id,
-            line_number=outcome.line.line_number,
-            txn_date=outcome.line.txn_date,
-            description=outcome.line.description,
-            amount=outcome.line.amount,
-            confidence=raw.min_confidence,
-            status=_line_status(raw, threshold),
-        )
-        db.add(transaction)
+        transaction = existing_transactions.get(outcome.line_number)
+        if transaction is None:
+            transaction = Transaction(org_id=document.org_id, document_id=document.id, line_number=outcome.line.line_number)
+            db.add(transaction)
+        transaction.txn_date = outcome.line.txn_date
+        transaction.description = outcome.line.description
+        transaction.amount = outcome.line.amount
+        transaction.confidence = raw.min_confidence
+        transaction.status = _line_status(raw, threshold)
         db.flush()
 
-        db.add(
-            ExtractionResult(
-                org_id=document.org_id,
-                document_id=document.id,
-                transaction_id=transaction.id,
-                line_number=raw.line_number,
-                method=raw.weakest_method,
-                confidence=raw.min_confidence,
-                fields=raw.to_json(),
+        extraction_result = existing_results.get(outcome.line_number)
+        if extraction_result is None:
+            extraction_result = ExtractionResult(
+                org_id=document.org_id, document_id=document.id, line_number=raw.line_number
             )
-        )
+            db.add(extraction_result)
+        extraction_result.transaction_id = transaction.id
+        extraction_result.method = raw.weakest_method
+        extraction_result.confidence = raw.min_confidence
+        extraction_result.fields = raw.to_json()
         db.add(
             AuditLogEntry(
                 org_id=document.org_id,
@@ -500,6 +544,23 @@ def run_pipeline(document_id: uuid.UUID, db: Session, deps: PipelineDeps | None 
     if document is None:
         raise ValueError(f"Document {document_id} not found")
 
+    if document.status in _TERMINAL_STATUSES:
+        # Idempotent no-op (issue #7, AC3/AC6): a redelivered/retried task
+        # for a Document that already finished a prior run must not
+        # re-extract and re-persist -- that would duplicate Transaction and
+        # ExtractionResult rows despite the unique (document_id, line_number)
+        # constraint being the last-resort guard, not the intended path.
+        logger.info(
+            "document.already_processed",
+            extra={"document_id": str(document_id), "status": document.status.value},
+        )
+        return document
+
+    logger.info(
+        "document.processing_started",
+        extra={"document_id": str(document_id), "org_id": str(document.org_id)},
+    )
+
     document.status = DocumentStatus.processing
     db.commit()
 
@@ -518,12 +579,16 @@ def run_pipeline(document_id: uuid.UUID, db: Session, deps: PipelineDeps | None 
         _build_graph(document, db, deps, threshold, categories, examples).invoke(
             {"document_id": str(document_id)}
         )
-    except Exception:
+    except Exception as exc:
         db.rollback()
         failed = db.get(Document, document_id)
         if failed is not None:
             failed.status = DocumentStatus.failed
             db.commit()
+        logger.warning(
+            "document.processing_failed",
+            extra={"document_id": str(document_id), "error_type": type(exc).__name__},
+        )
         raise
 
     if document.status != DocumentStatus.needs_review:
@@ -531,6 +596,16 @@ def run_pipeline(document_id: uuid.UUID, db: Session, deps: PipelineDeps | None 
         # needs_review itself) derives status from what actually persisted.
         document.status = derive_document_status(list(document.transactions))
         db.commit()
+
+    logger.info(
+        "document.processing_finished",
+        extra={
+            "document_id": str(document_id),
+            "org_id": str(document.org_id),
+            "status": document.status.value,
+            "transaction_count": len(document.transactions),
+        },
+    )
 
     # Reconciliation runs incrementally whenever a Document finishes
     # extraction (issue #6, AC1) -- a no-op when nothing was persisted

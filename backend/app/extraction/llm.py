@@ -32,6 +32,7 @@ from typing import Any, Protocol
 
 from app.extraction.types import ExtractedField, ExtractedLine
 from app.models import ExtractionMethod
+from app.retry import with_backoff
 
 DEFAULT_MODEL = "openrouter/anthropic/claude-3-haiku"
 
@@ -61,18 +62,37 @@ _FIELD_PROMPT_TEMPLATE = (
 class LlmRefiner(Protocol):
     """Second-pass correction of specific low-confidence fields on one line."""
 
+    #: Non-None on a refiner that makes a real, billable call -- used by
+    #: app/pipeline.py to decide whether a call is worth a LlmUsage row
+    #: (issue #7, AC5). None on NullRefiner, which never calls out.
+    PROVIDER: str | None
+
     def refine(self, line: ExtractedLine, field_names: list[str]) -> dict[str, ExtractedField]:
         """Return replacements for (a subset of) `field_names`."""
 
 
+def _is_transient_http_error(exc: BaseException) -> bool:
+    import httpx
+
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in (429, 500, 502, 503, 504)
+    return isinstance(exc, (httpx.TransportError, httpx.TimeoutException))
+
+
 class OpenRouterRefiner:
     """Real refiner: an OpenAI-compatible chat completion via OpenRouter."""
+
+    PROVIDER: str | None = "openrouter"
 
     def __init__(self, api_key: str, model: str, base_url: str, timeout_seconds: float = 60.0) -> None:
         self._api_key = api_key
         self._model = model
         self._base_url = base_url.rstrip("/")
         self._timeout_seconds = timeout_seconds
+
+    @property
+    def model(self) -> str:
+        return self._model
 
     def refine(self, line: ExtractedLine, field_names: list[str]) -> dict[str, ExtractedField]:
         import httpx
@@ -91,15 +111,24 @@ class OpenRouterRefiner:
                 },
             ],
         }
-        response = httpx.post(
-            f"{self._base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {self._api_key}"},
-            json=payload,
-            timeout=self._timeout_seconds,
+
+        def _call() -> dict[str, ExtractedField]:
+            response = httpx.post(
+                f"{self._base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self._api_key}"},
+                json=payload,
+                timeout=self._timeout_seconds,
+            )
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"]["content"]
+            return parse_refinement(content, field_names)
+
+        return with_backoff(
+            _call,
+            op_name="llm.openrouter_refine_line",
+            retry_on=(httpx.HTTPError,),
+            should_retry=_is_transient_http_error,
         )
-        response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"]
-        return parse_refinement(content, field_names)
 
 
 class NullRefiner:
@@ -109,6 +138,8 @@ class NullRefiner:
     flagged for review, which is the correct degradation -- silently
     promoting unverified OCR output would be worse than asking a human.
     """
+
+    PROVIDER: str | None = None
 
     def refine(self, line: ExtractedLine, field_names: list[str]) -> dict[str, ExtractedField]:
         return {}
@@ -154,6 +185,9 @@ class RefinedField:
 
 
 class LLMRefinementClient(Protocol):
+    #: See LlmRefiner.PROVIDER -- same purpose, same issue #7 AC5 rationale.
+    PROVIDER: str | None
+
     def refine_field(
         self,
         field_name: str,
@@ -163,11 +197,34 @@ class LLMRefinementClient(Protocol):
     ) -> RefinedField: ...
 
 
+def _is_transient_litellm_error(exc: BaseException) -> bool:
+    import litellm
+
+    transient_types = tuple(
+        t
+        for t in (
+            getattr(litellm, "RateLimitError", None),
+            getattr(litellm, "APIConnectionError", None),
+            getattr(litellm, "Timeout", None),
+            getattr(litellm, "InternalServerError", None),
+            getattr(litellm, "ServiceUnavailableError", None),
+        )
+        if t is not None
+    )
+    return isinstance(exc, transient_types)
+
+
 class LiteLLMRefinementClient:
     """Real implementation: one vision-model call per low-confidence field."""
 
+    PROVIDER: str | None = "litellm"
+
     def __init__(self, model: str = DEFAULT_MODEL) -> None:
         self._model = model
+
+    @property
+    def model(self) -> str:
+        return self._model
 
     def refine_field(
         self,
@@ -180,26 +237,35 @@ class LiteLLMRefinementClient:
 
         encoded = base64.b64encode(document_bytes).decode("ascii")
         data_url = f"data:{content_type};base64,{encoded}"
-        response = litellm.completion(
-            model=self._model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": _FIELD_PROMPT_TEMPLATE.format(
-                                field_name=field_name, current_value=current_value
-                            ),
-                        },
-                        {"type": "image_url", "image_url": {"url": data_url}},
-                    ],
-                }
-            ],
+
+        def _call() -> RefinedField:
+            response = litellm.completion(
+                model=self._model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": _FIELD_PROMPT_TEMPLATE.format(
+                                    field_name=field_name, current_value=current_value
+                                ),
+                            },
+                            {"type": "image_url", "image_url": {"url": data_url}},
+                        ],
+                    }
+                ],
+            )
+            content = response.choices[0].message.content
+            parsed = json.loads(content)
+            return RefinedField(value=parsed.get("value"), confidence=float(parsed.get("confidence", 0.0)))
+
+        return with_backoff(
+            _call,
+            op_name="llm.litellm_refine_field",
+            retry_on=(Exception,),
+            should_retry=_is_transient_litellm_error,
         )
-        content = response.choices[0].message.content
-        parsed = json.loads(content)
-        return RefinedField(value=parsed.get("value"), confidence=float(parsed.get("confidence", 0.0)))
 
 
 @lru_cache

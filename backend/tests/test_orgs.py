@@ -178,3 +178,28 @@ def test_confidence_threshold_is_actually_used_by_the_pipeline(client, db_sessio
     assert result.status == DocumentStatus.done
     transaction = db_session.query(Transaction).filter_by(document_id=document.id).one()
     assert transaction.status == TransactionStatus.resolved
+
+
+def test_llm_usage_endpoint_reports_per_tenant_totals(client, db_session, unique_email):
+    """issue #7, AC5: per-tenant LLM usage is tracked and queryable."""
+    owner = _signup(client, unique_email)
+    headers = _auth_headers(owner["access_token"])
+
+    from app.llm_usage import record_llm_call
+    from app.models import Organization
+
+    org = db_session.query(Organization).filter_by(name="Acme Tax").one()
+    record_llm_call(db_session, org_id=org.id, document_id=None, provider="openrouter", model="haiku")
+    record_llm_call(db_session, org_id=org.id, document_id=None, provider="openrouter", model="haiku")
+    db_session.commit()
+
+    response = client.get("/orgs/me/llm-usage", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == [{"provider": "openrouter", "model": "haiku", "calls": 2}]
+
+
+def test_llm_usage_endpoint_requires_auth(client):
+    response = client.get("/orgs/me/llm-usage")
+    assert response.status_code == 401

@@ -27,11 +27,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from app.extraction.types import ExtractedField as LineField
 from app.extraction.types import ExtractedLine
 from app.models import ExtractionMethod
+from app.retry import with_backoff
 
 # Textract confidences are 0-100; the rest of the system works in 0-1.
 _CONFIDENCE_SCALE = 100.0
@@ -87,6 +88,39 @@ class TextractClient(Protocol):
         ...
 
 
+def _is_transient_boto_error(exc: BaseException) -> bool:
+    """Throttling, transient 5xx and connection-level failures are worth a
+    retry; anything else (bad input, auth, an unrecognized document) is not
+    -- retrying it would only delay the inevitable failure."""
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return True
+    try:
+        from botocore.exceptions import ClientError, ConnectionError as BotoConnectionError
+
+        if isinstance(exc, BotoConnectionError):
+            return True
+        if isinstance(exc, ClientError):
+            code = exc.response.get("Error", {}).get("Code", "")
+            return code in _THROTTLE_ERROR_CODES
+    except ImportError:  # pragma: no cover - botocore ships with boto3
+        pass
+    return False
+
+
+_THROTTLE_ERROR_CODES = frozenset(
+    {
+        "ThrottlingException",
+        "ProvisionedThroughputExceededException",
+        "TooManyRequestsException",
+        "RequestTimeout",
+        "RequestTimeoutException",
+        "InternalServerError",
+        "ServiceUnavailable",
+        "ServiceUnavailableException",
+    }
+)
+
+
 class AwsTextractClient:
     """The real client. Credentials come from the standard AWS env chain."""
 
@@ -101,8 +135,21 @@ class AwsTextractClient:
             self._client = boto3.client("textract", region_name=self._region_name)
         return self._client
 
+    def _retrying_call(self, op_name: str, call: Callable[[], Any]) -> Any:
+        import botocore.exceptions
+
+        return with_backoff(
+            call,
+            op_name=f"textract.{op_name}",
+            retry_on=(botocore.exceptions.BotoCoreError, botocore.exceptions.ClientError, TimeoutError, ConnectionError),
+            should_retry=_is_transient_boto_error,
+        )
+
     def detect_text(self, document_bytes: bytes) -> list[str]:
-        response = self._boto_client().detect_document_text(Document={"Bytes": document_bytes})
+        response = self._retrying_call(
+            "detect_text",
+            lambda: self._boto_client().detect_document_text(Document={"Bytes": document_bytes}),
+        )
         return [
             block["Text"]
             for block in response.get("Blocks", [])
@@ -110,7 +157,10 @@ class AwsTextractClient:
         ]
 
     def analyze_expense(self, document_bytes: bytes) -> TextractExpenseResult:
-        response = self._boto_client().analyze_expense(Document={"Bytes": document_bytes})
+        response = self._retrying_call(
+            "analyze_expense",
+            lambda: self._boto_client().analyze_expense(Document={"Bytes": document_bytes}),
+        )
         fields: list[ExtractedField] = []
         for expense_doc in response.get("ExpenseDocuments", []):
             for summary_field in expense_doc.get("SummaryFields", []):
@@ -129,8 +179,11 @@ class AwsTextractClient:
         return TextractExpenseResult(fields=fields)
 
     def analyze_document(self, document_bytes: bytes) -> dict[str, Any]:
-        response = self._boto_client().analyze_document(
-            Document={"Bytes": document_bytes}, FeatureTypes=["TABLES"]
+        response = self._retrying_call(
+            "analyze_document",
+            lambda: self._boto_client().analyze_document(
+                Document={"Bytes": document_bytes}, FeatureTypes=["TABLES"]
+            ),
         )
         return dict(response)
 
