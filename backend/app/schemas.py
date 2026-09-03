@@ -199,3 +199,30 @@ class DashboardFlagsOut(BaseModel):
     end_date: date
     unmatched_bank_transactions: list[TransactionOut]
     unmatched_expense_transactions: list[TransactionOut]
+
+
+class TransactionExportRow(BaseModel):
+    """One Transaction rendered for an accountant/tax-software export
+    (issue #9). Every Transaction in the selected date range is included
+    regardless of processing state -- `category`, `review_status`, and
+    `match_status` make the still-needs-attention rows explicit rather than
+    silently dropping them (AC3).
+
+    `category` is the Category name (or "Uncategorized"), not an id, since
+    the destination is a human/accountant-facing table, not another API
+    consumer. `review_status` mirrors Transaction.status (CONTEXT.md:
+    `needs_review` clears once a human confirms the extracted fields).
+    `match_status` is derived from ReconciliationMatch membership --
+    `matched` or `unmatched` -- since a Transaction carries no match state
+    of its own (see CONTEXT.md, ReconciliationMatch)."""
+
+    id: uuid.UUID
+    document_id: uuid.UUID
+    txn_date: date
+    description: str
+    amount: Decimal
+    category: str
+    review_status: TransactionStatus
+    match_status: str
+
+    model_config = {"from_attributes": True}

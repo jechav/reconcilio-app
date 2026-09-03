@@ -1,6 +1,7 @@
 import { Link, Route, Routes } from "react-router-dom";
 
 import { Dashboard } from "./pages/Dashboard";
+import { Export } from "./pages/Export";
 import { Home } from "./pages/Home";
 import { Login } from "./pages/Login";
 import { Signup } from "./pages/Signup";
@@ -15,6 +16,7 @@ export function App() {
         <Link to="/signup">Sign up</Link>
         <Link to="/upload">Upload</Link>
         <Link to="/dashboard">Dashboard</Link>
+        <Link to="/export">Export</Link>
       </nav>
       <Routes>
         <Route path="/" element={<Home />} />
@@ -22,6 +24,7 @@ export function App() {
         <Route path="/signup" element={<Signup />} />
         <Route path="/upload" element={<Upload />} />
         <Route path="/dashboard" element={<Dashboard />} />
+        <Route path="/export" element={<Export />} />
       </Routes>
     </div>
   );

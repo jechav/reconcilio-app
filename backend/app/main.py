@@ -8,6 +8,7 @@ from app.routers import (
     categories,
     dashboard,
     documents,
+    export,
     health,
     orgs,
     reconciliation,
@@ -36,3 +37,4 @@ app.include_router(reconciliation.router)
 app.include_router(categories.router)
 app.include_router(transactions.router)
 app.include_router(dashboard.router)
+app.include_router(export.router)
