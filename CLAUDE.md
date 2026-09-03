@@ -14,4 +14,4 @@ Single-context layout (`CONTEXT.md` + `docs/adr/` at repo root). See `docs/agent
 
 ### Automated ticket execution (Ralph)
 
-`/ralph` claims `ready-for-agent` issues (up to 2 concurrent), implements each in its own git worktree via `/implement`, validates, and opens a linked (possibly stacked) PR. See `docs/agents/ralph.md`.
+`/ralph` drains the whole `ready-for-agent` pool in one invocation: claims every currently eligible issue, implements each in its own git worktree via `/implement`, validates, opens a PR, and merges it (resolving conflicts) before re-checking for newly-unblocked issues. See `docs/agents/ralph.md`.
