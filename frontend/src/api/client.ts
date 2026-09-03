@@ -235,6 +235,59 @@ export function getAuditLog(token: string, filters: AuditLogFilters = {}): Promi
   return getJson<AuditLogEntryOut[]>(`/audit-log${query ? `?${query}` : ""}`, token);
 }
 
+export interface ChatSessionOut {
+  id: string;
+  user_id: string;
+  title: string | null;
+  created_at: string;
+}
+
+export interface ChatCitationOut {
+  source_type: "document" | "transaction";
+  source_id: string;
+  document_id: string;
+  transaction_id: string | null;
+}
+
+export type ChatRole = "user" | "assistant";
+
+export interface ChatMessageOut {
+  id: string;
+  session_id: string;
+  role: ChatRole;
+  content: string;
+  citations: ChatCitationOut[];
+  created_at: string;
+}
+
+/** Creates a new ChatSession for the caller's Organization (issue #11, AC6). */
+export function createChatSession(token: string): Promise<ChatSessionOut> {
+  return postJson<ChatSessionOut>("/chat/sessions", {}, token);
+}
+
+/** Every ChatSession in the caller's Organization, newest first -- every
+ * member has uniform visibility into the Organization's chat history, same
+ * as any other Organization-scoped data (see CONTEXT.md, OrgMembership). */
+export function listChatSessions(token: string): Promise<ChatSessionOut[]> {
+  return getJson<ChatSessionOut[]>("/chat/sessions", token);
+}
+
+export function listChatMessages(token: string, sessionId: string): Promise<ChatMessageOut[]> {
+  return getJson<ChatMessageOut[]>(`/chat/sessions/${sessionId}/messages`, token);
+}
+
+/** Asks the read-only chat agent one question in an existing session
+ * (backend/app/chat/agent.py) and returns the new user + assistant message
+ * pair, the assistant one carrying citations to the Documents/Transactions
+ * its answer actually drew on (issue #11, AC5). */
+export function postChatMessage(
+  token: string,
+  sessionId: string,
+  content: string,
+): Promise<ChatMessageOut[]> {
+  return postJson<ChatMessageOut[]>(`/chat/sessions/${sessionId}/messages`, { content }, token);
+}
+
 export type ExportFormat = "csv" | "json";
 
 export interface ExportDownload {

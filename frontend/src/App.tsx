@@ -1,6 +1,7 @@
 import { Link, Route, Routes } from "react-router-dom";
 
 import { AuditLog } from "./pages/AuditLog";
+import { Chat } from "./pages/Chat";
 import { Dashboard } from "./pages/Dashboard";
 import { Export } from "./pages/Export";
 import { Home } from "./pages/Home";
@@ -19,6 +20,7 @@ export function App() {
         <Link to="/dashboard">Dashboard</Link>
         <Link to="/export">Export</Link>
         <Link to="/audit-log">Audit log</Link>
+        <Link to="/chat">Chat</Link>
       </nav>
       <Routes>
         <Route path="/" element={<Home />} />
@@ -28,6 +30,7 @@ export function App() {
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/export" element={<Export />} />
         <Route path="/audit-log" element={<AuditLog />} />
+        <Route path="/chat" element={<Chat />} />
       </Routes>
     </div>
   );
