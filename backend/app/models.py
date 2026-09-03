@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Enum, ForeignKey, String, UniqueConstraint
+from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -62,3 +62,43 @@ class OrgMembership(Base):
 
     user: Mapped["User"] = relationship(back_populates="memberships")
     organization: Mapped["Organization"] = relationship(back_populates="memberships")
+
+
+class DocumentType(str, enum.Enum):
+    invoice_or_receipt = "invoice_or_receipt"
+    bank_statement = "bank_statement"
+
+
+class DocumentStatus(str, enum.Enum):
+    queued = "queued"
+    processing = "processing"
+    done = "done"
+    failed = "failed"
+
+
+class Document(Base):
+    """A source file uploaded by a user (invoice, receipt, or bank statement).
+
+    Stored in MinIO under `minio_key`; `status` tracks progress through the
+    (currently stub) extraction pipeline. See CONTEXT.md for the full
+    domain definition.
+    """
+
+    __tablename__ = "documents"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False
+    )
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    minio_key: Mapped[str] = mapped_column(String(512), nullable=False, unique=True)
+    doc_type: Mapped[DocumentType] = mapped_column(Enum(DocumentType, name="document_type"), nullable=False)
+    status: Mapped[DocumentStatus] = mapped_column(
+        Enum(DocumentStatus, name="document_status"), nullable=False, default=DocumentStatus.queued
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now, nullable=False
+    )
