@@ -10,6 +10,13 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
 
     minio_endpoint: str = "localhost:9000"
+    # Host the *browser* uses to reach MinIO when PUTting/GETting a presigned
+    # URL. Distinct from minio_endpoint because in docker-compose the API
+    # reaches MinIO over the compose network as "minio:9000", but a browser
+    # running on the host can't resolve that — it needs the mapped port on
+    # localhost instead. Defaults to "localhost:9000" (the port docker-compose
+    # maps to the host) regardless of what minio_endpoint is set to.
+    minio_public_endpoint: str = "localhost:9000"
     minio_access_key: str = "minioadmin"
     minio_secret_key: str = "minioadmin"
     minio_bucket: str = "reconcilio"

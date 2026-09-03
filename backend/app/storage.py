@@ -23,9 +23,31 @@ _REGION = "us-east-1"
 
 @lru_cache
 def get_minio_client() -> Minio:
+    """Client used for the API's own server-to-server calls (bucket admin)."""
     settings = get_settings()
     return Minio(
         settings.minio_endpoint,
+        access_key=settings.minio_access_key,
+        secret_key=settings.minio_secret_key,
+        secure=settings.minio_secure,
+        region=_REGION,
+    )
+
+
+@lru_cache
+def get_public_minio_client() -> Minio:
+    """Client used only to sign URLs handed to the browser.
+
+    Presigning computes a signature locally and never opens a connection,
+    so this client can be pointed at `minio_public_endpoint` (e.g.
+    "localhost:9000") even though that host may differ from the one the API
+    container itself uses to reach MinIO (e.g. "minio:9000" inside the
+    docker-compose network) — the browser, not the API, is what dereferences
+    the resulting URL.
+    """
+    settings = get_settings()
+    return Minio(
+        settings.minio_public_endpoint,
         access_key=settings.minio_access_key,
         secret_key=settings.minio_secret_key,
         secure=settings.minio_secure,
@@ -44,12 +66,12 @@ def presigned_put_url(key: str) -> str:
     """A short-lived, non-public URL the client PUTs the file bytes to."""
     settings = get_settings()
     ensure_bucket()
-    client = get_minio_client()
+    client = get_public_minio_client()
     return client.presigned_put_object(settings.minio_bucket, key, expires=PRESIGNED_URL_EXPIRY)
 
 
 def presigned_get_url(key: str) -> str:
     """A short-lived (never long-lived/public) URL for reading one object."""
     settings = get_settings()
-    client = get_minio_client()
+    client = get_public_minio_client()
     return client.presigned_get_object(settings.minio_bucket, key, expires=PRESIGNED_URL_EXPIRY)
