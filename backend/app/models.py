@@ -334,4 +334,49 @@ class AuditLogEntry(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
 
 
+class MatchType(str, enum.Enum):
+    """How a ReconciliationMatch came to exist -- see CONTEXT.md, Manual match."""
+
+    automatic = "automatic"
+    manual = "manual"
+
+
+class ReconciliationMatch(Base):
+    """A strictly one-to-one link between a bank Transaction and an
+    expense-source (invoice/receipt) Transaction (see ADR-0002).
+
+    `bank_transaction_id` and `expense_transaction_id` are each unique across
+    the table, which is what makes one-to-one a database-level guarantee
+    rather than just an algorithm convention: a Transaction can be claimed by
+    at most one ReconciliationMatch regardless of whether that match was
+    created automatically or manually.
+    """
+
+    __tablename__ = "reconciliation_matches"
+    __table_args__ = (
+        UniqueConstraint("bank_transaction_id", name="uq_reconciliation_matches_bank_txn"),
+        UniqueConstraint("expense_transaction_id", name="uq_reconciliation_matches_expense_txn"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False, index=True
+    )
+    bank_transaction_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("transactions.id"), nullable=False
+    )
+    expense_transaction_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("transactions.id"), nullable=False
+    )
+    match_type: Mapped[MatchType] = mapped_column(Enum(MatchType, name="match_type"), nullable=False)
+    # 0-1. Lower when the algorithm broke a tie between multiple qualifying
+    # candidates by closest date (see app/reconciliation.py); manual matches
+    # are always recorded at 1.0 since a human made the call directly.
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    # "system" for automatic matches, the acting user's id (as a string) for
+    # manual ones -- same convention as AuditLogEntry.actor.
+    actor: Mapped[str] = mapped_column(String(255), nullable=False, default="system")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+
+
 SYSTEM_ACTOR = "system"
