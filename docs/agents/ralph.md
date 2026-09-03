@@ -1,10 +1,12 @@
 # Ralph: automated ticket execution
 
 Ralph is an on-demand loop, invoked via `/ralph`, that picks up `ready-for-agent`
-issues, implements them in an isolated git worktree, validates the result,
-and opens a linked pull request — stacking PRs when a ticket depends on
-another that's still in flight. It follows the "Ralph Wiggum" methodology: a
-simple, repeatable loop rather than a smart planner.
+issues, implements each in its own isolated git worktree, validates the
+result, opens a pull request, and merges it into `main` (resolving conflicts
+itself) — which in turn unblocks any dependent ticket, so a single
+invocation can drain an entire dependency chain. It follows the
+"Ralph Wiggum" methodology: a simple, repeatable loop rather than a smart
+planner.
 
 The per-ticket executor follows `/implement`'s *practices* (TDD at natural
 seams, regular typechecking, a full test-suite run, self-review, incremental
@@ -12,12 +14,13 @@ commits) rather than invoking `/implement` as a skill — `/implement` has
 `disable-model-invocation: true` and refuses non-interactive invocation, and
 there is no human present in a Ralph run to invoke it themselves.
 
-Each `/ralph` invocation does exactly one discovery-and-dispatch tick against
-live GitHub state. It is **not** scheduled or backgrounded — a human runs it
-each time they want the pool drained further. This keeps state entirely in
-GitHub (labels + assignee), so nothing needs to survive locally between
-invocations, and any bug in the claim logic can't compound silently across
-unattended ticks.
+Each `/ralph` invocation loops against live GitHub state — claim every
+currently eligible issue, dispatch, merge each PR as it lands, re-check for
+newly-unblocked issues, repeat — until the pool is fully drained. It is
+**not** scheduled or backgrounded — a human runs it when they want the pool
+drained. This keeps state entirely in GitHub (labels + assignee), so nothing
+needs to survive locally between invocations, and any bug in the claim logic
+can't compound silently across unattended runs.
 
 ## State machine
 
@@ -32,23 +35,36 @@ ready-for-agent, unassigned                          [pickup pool]
         |  claim (orchestrator, sequential, before fan-out):
         |    gh issue edit <n> --add-assignee @me --add-label ralph:in-progress --remove-label ready-for-agent
         v
-ralph:in-progress, assigned                           [claimed; concurrency count = count of this label]
+ralph:in-progress, assigned                [claimed; no cap on how many at once]
         |
         +-- success: gh pr create ...
         |     gh issue edit <n> --remove-label ralph:in-progress --add-label ralph:pr-open
-        |     -> ralph:pr-open, assigned  [terminal; issue auto-closes when the PR (or PR chain) merges to main]
+        |     -> ralph:pr-open, assigned  [executor reports back; worktree left in place]
+        |         |
+        |         |  orchestrator (sequential, one merge at a time):
+        |         |    gh pr merge <pr> --merge
+        |         |    on conflict: resolve in the worktree, re-validate, retry
+        |         v
+        |     merged to main -> issue auto-closes (PR body's "Closes #n")
+        |     git worktree remove <worktree-path>
+        |     -> unblocks any dependent still waiting on this issue
         |
-        +-- failure (validation never goes green):
+        +-- failure (validation never goes green, OR merge conflict that
+            can't be resolved cleanly):
               gh issue edit <n> --remove-label ralph:in-progress --add-label ralph:failed --remove-assignee @me
+              (or --remove-label ralph:pr-open, if it failed at the merge step)
               gh issue comment <n> --body "<what was tried, why it failed, worktree path>"
               worktree left in place (not removed)
-              -> ralph:failed, unassigned  [human queue: gh issue list --label ralph:failed]
+              -> ralph:failed, unassigned  [human queue: gh issue list --label ralph:failed; also blocks any dependent indefinitely]
 ```
 
 `ready-for-agent` is removed at **claim** time, not at PR-open time — this is
-what keeps the pickup-pool query and the in-flight count in sync with no
-separate bookkeeping. The concurrency cap (max 2 concurrent tickets) is
-enforced purely as `len(gh issue list --state open --label ralph:in-progress)`.
+what keeps the pickup-pool query in sync with no separate bookkeeping. There
+is no artificial concurrency cap: every currently eligible issue is claimed
+and dispatched. The only natural throttle is that a dependent isn't eligible
+until its blocker is actually merged (see below), so the in-flight count
+grows and shrinks with the shape of the dependency graph rather than a fixed
+limit.
 
 ## Dependency / stacking resolution
 
@@ -62,22 +78,22 @@ gh api repos/<owner>/<repo>/issues/<n> --jq '.issue_dependencies_summary'
 | Blocker state | Action for dependent |
 |---|---|
 | `blocked_by == 0` | Eligible now. Base branch = `main`. |
-| Every open blocker has an **open PR** | Eligible now, stacked. Base branch = that blocker's PR head branch. |
-| Any open blocker has no PR yet (unclaimed, or still implementing) | **Not eligible this tick.** Skip — a dependent only starts once its blocker has a real PR to stack on, never on a worktree branch that might still be amended. |
+| Every blocker's issue is **closed** (i.e. merged by Ralph — see "Postgres test isolation" and the orchestrator's merge step below) | Eligible now. Base branch = `main`. |
+| Any blocker still open (not yet merged) | **Not eligible yet.** Skip — recheck after the next merge lands; a dependent never bases on an unmerged branch. |
+
+Since an issue only auto-closes via a merged PR's `Closes #n` (Ralph never
+closes an issue by hand), "issue closed" is a reliable merged-signal on its
+own — no separate PR-state query is needed.
 
 If `issue_dependencies_summary` is null/absent for an issue (native
 dependencies not populated), fall back to parsing a `## Blocked by` section
-in the issue body for `#<n>` references, and apply the same
-open/has-a-PR logic to each referenced issue via `gh issue view <b> --json state`.
+in the issue body for `#<n>` references, and apply the same closed-check to
+each referenced issue via `gh issue view <b> --json state`.
 
-To find a blocker's open PR:
-
-```bash
-gh pr list --head "claude/issue-<b>-*" --state open --json number,headRefName,baseRefName
-```
-
-Among the eligible set, select up to `2 - in_flight` tickets, **oldest issue
-number first**, for determinism.
+Among the eligible set, claim and dispatch **all of them**, oldest issue
+number first for determinism — there is no per-tick slot limit. Re-run this
+eligibility check after every merge, since a merge can unblock issues that
+weren't eligible a moment ago; repeat until the pool is drained.
 
 ## Branch, worktree, and PR conventions
 
@@ -87,12 +103,15 @@ number first**, for determinism.
   collide with a leftover branch)
 - Created by the per-ticket executor, immediately after its claim succeeds:
   ```bash
-  git worktree add .claude/worktrees/issue-<n>-<slug> -b claude/issue-<n>-<hash> <base-branch>
+  git worktree add .claude/worktrees/issue-<n>-<slug> -b claude/issue-<n>-<hash> main
   ```
-- On success (PR pushed): `git worktree remove .claude/worktrees/issue-<n>-<slug>`
-  — the branch persists as a ref, only the working directory goes away.
-- On failure: the worktree is left in place as the debugging artifact a
-  human opens next.
+- On success (PR pushed): the per-ticket executor leaves the worktree in
+  place — it does not remove it. The orchestrator removes it
+  (`git worktree remove .claude/worktrees/issue-<n>-<slug>`) once it has
+  merged the PR, so the worktree is still there if a merge conflict needs
+  resolving in it first.
+- On failure (validation or an unresolvable merge conflict): the worktree is
+  left in place as the debugging artifact a human opens next.
 
 PR body template (matches PR #13's format):
 
@@ -103,20 +122,19 @@ PR body template (matches PR #13's format):
 ## Test plan
 - [x] ...
 
-Depends on #<b>       <!-- only for stacked PRs, one line per open blocker -->
 Closes #<n>
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 ```
 
-`--base` for `gh pr create` is the literal blocker branch name for a stacked
-PR, or `main` otherwise. GitHub retargets a stacked PR to `main` on its own
-once the blocker PR merges — Ralph does not manage restacking.
+`--base` for `gh pr create` is always `main` — every ticket, including
+dependents, only ever starts once its blocker is already merged, so there is
+no stacking or PR-retargeting to manage.
 
 ## Postgres test isolation
 
-Two tickets can be validating concurrently, so each gets its own test
-database rather than sharing one:
+Any number of tickets can be validating concurrently, so each gets its own
+test database rather than sharing one:
 
 ```bash
 DB_NAME="reconcilio_test_issue_<n>"
@@ -152,10 +170,14 @@ When a ticket lands in `ralph:failed`:
 
 - It's unassigned, so `gh issue list --state open --label ralph:failed`
   is the queue a human checks.
-- The issue comment left by the executor explains what was tried and why
-  it didn't validate, and names the worktree path for direct debugging.
+- The comment left on the issue explains what was tried and why it didn't
+  validate — or, for a failure at the merge step, why the merge conflict
+  couldn't be resolved cleanly — and names the worktree path for direct
+  debugging.
 - Ralph does **not** auto-retry — a real failure retried unattended just
-  burns tokens repeating the same mistake.
+  burns tokens repeating the same mistake. Note that a failed ticket also
+  blocks any dependent indefinitely, since a dependent only becomes
+  eligible once its blocker is merged.
 - To requeue: a human fixes the underlying issue (in the brief, in the
   code, or manually in the worktree), then runs
   `gh issue edit <n> --add-label ready-for-agent --remove-label ralph:failed`
@@ -163,10 +185,14 @@ When a ticket lands in `ralph:failed`:
 
 ## Future: scheduled / workflow-based execution
 
-This iteration is deliberately manual-invocation-only. If usage grows to
-where continuous draining of the pool is wanted, the natural upgrade path
-is the `Workflow` tool (true worktree isolation, a native concurrency cap,
-`parallel`/`pipeline` primitives) driven by a recurring `CronCreate`
-schedule — the orchestrator/executor split above maps directly onto a
-workflow's discovery step and per-ticket `agent()` calls. Not built now;
-requires an explicit opt-in to the `Workflow` tool.
+A single `/ralph` invocation now drains the whole pool on its own — claim,
+dispatch, merge, re-check for newly-unblocked issues, repeat until nothing
+eligible remains — rather than doing one tick and stopping. It's still
+manual-invocation-only, not scheduled. If usage grows to where continuous,
+unattended draining is wanted (e.g. triggered automatically whenever a new
+`ready-for-agent` issue appears, not just when a human remembers to run
+`/ralph`), the natural upgrade path is the `Workflow` tool (true worktree
+isolation, native `parallel`/`pipeline` primitives) driven by a recurring
+`CronCreate` schedule — the orchestrator/executor split above maps directly
+onto a workflow's discovery step and per-ticket `agent()` calls. Not built
+now; requires an explicit opt-in to the `Workflow` tool.

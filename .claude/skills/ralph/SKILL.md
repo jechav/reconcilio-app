@@ -1,20 +1,25 @@
 ---
 name: ralph
-description: "Automated ticket execution loop: claim ready-for-agent GitHub issues, implement each in an isolated worktree via /implement, validate, and open a linked (possibly stacked) PR."
+description: "Automated ticket execution loop: claim every eligible ready-for-agent GitHub issue, implement each in its own isolated worktree via /implement, validate, open a linked PR, and merge it (resolving conflicts) before picking up newly-unblocked issues."
 disable-model-invocation: true
 ---
 
-One `/ralph` invocation is one discovery-and-dispatch tick, not a standing
-loop. Conventions (state machine, labels, dependency resolution, worktree
-layout, PR template, test isolation) are documented in full in
-[docs/agents/ralph.md](../../../docs/agents/ralph.md) — read it first if
-anything below is ambiguous, it is the source of truth.
+One `/ralph` invocation drains the whole `ready-for-agent` pool in a loop —
+claim, dispatch, merge each PR as it lands, re-check for newly-unblocked
+issues, repeat — rather than doing a single tick. It is still only
+invoked manually, not scheduled. Conventions (state machine, labels,
+dependency resolution, worktree layout, PR template, test isolation) are
+documented in full in [docs/agents/ralph.md](../../../docs/agents/ralph.md)
+— read it first if anything below is ambiguous, it is the source of truth.
 
 Infer `<owner>/<repo>` from `git remote -v` as usual.
 
 ## Orchestrator procedure
 
-Run this yourself, in this turn, before spawning anything.
+Run this yourself, in this turn, before spawning anything. This loops until
+the pool is drained: dispatch every currently eligible issue, merge each PR
+as it lands (which can unblock more issues), re-check eligibility, and
+repeat until nothing eligible remains and nothing is in flight.
 
 1. **Precondition**: confirm Postgres is reachable, e.g.
    `pg_isready -h localhost -p 5432` or a `psql ... -c 'select 1'`. If it's
@@ -27,58 +32,78 @@ Run this yourself, in this turn, before spawning anything.
      --json number,title,body,labels,assignees
    ```
 
-3. **Compute concurrency slots**:
-   ```bash
-   gh issue list --state open --label ralph:in-progress --json number
-   ```
-   `in_flight = len(...)`, `slots = 2 - in_flight`. If `slots <= 0`, report
-   that no slots are free and stop — do not dispatch anything.
+3. **Loop** until there are no unclaimed `ready-for-agent` issues left *and*
+   nothing is in flight (`ralph:in-progress` or `ralph:pr-open`):
 
-4. **Filter to the eligible set.** For each issue `n` from step 2, apply the
-   dependency/stacking rules in `docs/agents/ralph.md` § "Dependency /
-   stacking resolution":
-   - Query `gh api repos/<owner>/<repo>/issues/<n> --jq '.issue_dependencies_summary'`.
-   - `blocked_by == 0` → eligible, base = `main`.
-   - `blocked_by > 0` → for every open blocker, check
-     `gh pr list --head "claude/issue-<b>-*" --state open --json number,headRefName`.
-     Eligible (stacked, base = that head branch) only if **every** open
-     blocker has an open PR; otherwise skip this issue for this tick.
-   - If `issue_dependencies_summary` is null, fall back to parsing a
-     `## Blocked by` section in the issue body and apply the same logic
-     per referenced issue via `gh issue view <b> --json state`.
+   a. **Filter to the eligible set.** For each unclaimed issue `n`, apply
+      the dependency rules in `docs/agents/ralph.md` § "Dependency /
+      stacking resolution":
+      - Query `gh api repos/<owner>/<repo>/issues/<n> --jq '.issue_dependencies_summary'`.
+      - `blocked_by == 0` → eligible, base = `main`.
+      - `blocked_by > 0` → eligible, base = `main`, only if **every**
+        blocker issue is **closed** (`gh issue view <b> --json state`).
+        Otherwise not eligible yet.
+      - If `issue_dependencies_summary` is null, fall back to parsing a
+        `## Blocked by` section in the issue body and apply the same
+        closed-check per referenced issue.
 
-5. **Select** up to `slots` eligible tickets, oldest issue number first.
-   If none are eligible, report that plainly (e.g. "N issues in the pool,
-   all blocked on tickets without an open PR yet") and stop.
+   b. If nothing is eligible and nothing is currently in flight, stop
+      looping and report (e.g. "N issues remain, all blocked on tickets
+      that haven't merged yet").
 
-6. **Claim sequentially**, one ticket at a time, *before* spawning any
-   subagent — this is what prevents two subagents racing to claim the same
-   ticket, since `gh` has no compare-and-swap:
-   ```bash
-   gh issue edit <n> --add-assignee @me --add-label ralph:in-progress --remove-label ready-for-agent
-   ```
+   c. **Claim** every eligible issue sequentially, one at a time, *before*
+      spawning any subagent — this is what prevents two subagents racing
+      to claim the same ticket, since `gh` has no compare-and-swap:
+      ```bash
+      gh issue edit <n> --add-assignee @me --add-label ralph:in-progress --remove-label ready-for-agent
+      ```
 
-7. **Dispatch**: for each claimed ticket, spawn one `Agent` tool call
-   (running concurrently, background is fine) with a fully self-contained
-   prompt covering: the issue number, the resolved base branch, the
-   worktree path (`.claude/worktrees/issue-<n>-<slug>`), the branch name
-   (`claude/issue-<n>-<hash>`), whether this is a stacked PR (and which
-   issue it depends on, for the `Depends on #<b>` PR body line), and the
-   full "Per-ticket executor procedure" below (paste it into the prompt —
-   the spawned agent has no access to this conversation).
+   d. **Dispatch**: for each newly-claimed ticket, spawn one `Agent` tool
+      call (running concurrently, background is fine — there is no cap on
+      how many run at once) with a fully self-contained prompt covering:
+      the issue number, the worktree path
+      (`.claude/worktrees/issue-<n>-<slug>`), the branch name
+      (`claude/issue-<n>-<hash>`), that the base branch is `main`, and the
+      full "Per-ticket executor procedure" below (paste it into the
+      prompt — the spawned agent has no access to this conversation).
 
-8. **Report** a short summary: which tickets were dispatched, with what
-   base branch each, and how many slots remain.
+   e. **As each per-ticket agent reports back**, handle it:
+      - *Validation failure*: nothing further to do — the executor already
+        left it in `ralph:failed` per its own procedure.
+      - *PR opened*: merge it yourself, sequentially (only one merge into
+        `main` at a time, even if several PRs finish around the same
+        time):
+        ```bash
+        gh pr merge <pr-number> --merge
+        ```
+        - On success: `git worktree remove <worktree-path>`. The issue
+          auto-closes via the PR's `Closes #n`. This may have just
+          unblocked other issues — go back to (a).
+        - On conflict: `cd` into `<worktree-path>`, `git fetch origin main`,
+          `git merge origin/main`, resolve conflicts (use the
+          `resolving-merge-conflicts` skill), re-run the full validation
+          gates from executor step 5, commit, push, then retry the merge.
+          If the conflict genuinely can't be resolved cleanly even after a
+          real attempt, treat it as a failure instead of forcing a bad
+          merge: `gh issue edit <n> --remove-label ralph:pr-open --add-label ralph:failed --remove-assignee @me`,
+          comment explaining what was tried and why, leave the worktree in
+          place, go back to (a) (this issue's dependents stay blocked).
+
+   f. Continue the loop from (a).
+
+4. **Report** a final summary once the loop ends: how many tickets were
+   merged, how many landed in `ralph:failed` (and why), and how many
+   remain un-eligible because they're blocked on a failed ticket.
 
 ## Per-ticket executor procedure
 
 Followed by each spawned agent, entirely inside its own worktree. The
-issue number, base branch, worktree path, branch name, and stacking info
-are given in your prompt — you do not need to re-derive them.
+issue number, worktree path, and branch name are given in your prompt — you
+do not need to re-derive them. The base branch is always `main`.
 
 1. **Create the worktree**:
    ```bash
-   git worktree add <worktree-path> -b <branch-name> <base-branch>
+   git worktree add <worktree-path> -b <branch-name> main
    ```
    Do all further work `cd`'d into `<worktree-path>`.
 
@@ -123,7 +148,7 @@ are given in your prompt — you do not need to re-derive them.
 6. **On success**:
    ```bash
    git push -u origin <branch-name>
-   gh pr create --base <base-branch> --head <branch-name> \
+   gh pr create --base main --head <branch-name> \
      --title "..." --body "$(cat <<'EOF'
    ## Summary
    - ...
@@ -131,7 +156,6 @@ are given in your prompt — you do not need to re-derive them.
    ## Test plan
    - [x] ...
 
-   Depends on #<b>   # only if stacked; one line per open blocker, omit otherwise
    Closes #<n>
 
    🤖 Generated with [Claude Code](https://claude.com/claude-code)
@@ -139,8 +163,10 @@ are given in your prompt — you do not need to re-derive them.
    )"
    gh issue edit <n> --remove-label ralph:in-progress --add-label ralph:pr-open
    gh issue comment <n> --body "Opened <pr-url>"
-   git worktree remove <worktree-path>
    ```
+   Leave the worktree in place — do **not** remove it. The orchestrator
+   merges this PR itself and removes the worktree once merged (it may need
+   the worktree to resolve a merge conflict first).
 
 7. **On failure** (validation still red after a genuine attempt to fix it):
    ```bash
