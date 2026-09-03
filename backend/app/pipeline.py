@@ -54,6 +54,7 @@ from app.models import (
     Transaction,
     TransactionStatus,
 )
+from app.reconciliation import run_reconciliation_for_document
 
 OCR_PATH = "ocr"
 STRUCTURED_PATH = "structured"
@@ -436,5 +437,11 @@ def run_pipeline(document_id: uuid.UUID, db: Session, deps: PipelineDeps | None 
         # needs_review itself) derives status from what actually persisted.
         document.status = derive_document_status(list(document.transactions))
         db.commit()
+
+    # Reconciliation runs incrementally whenever a Document finishes
+    # extraction (issue #6, AC1) -- a no-op when nothing was persisted
+    # (flag_unknown / fully-rejected extraction).
+    run_reconciliation_for_document(document_id, db)
+
     db.refresh(document)
     return document
