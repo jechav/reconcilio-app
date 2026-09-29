@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -7,12 +8,15 @@ import { Dashboard } from "../pages/Dashboard";
 import { saveSession } from "../session";
 
 function renderDashboard() {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
-    <MemoryRouter initialEntries={["/dashboard"]}>
-      <Routes>
-        <Route path="/dashboard" element={<Dashboard />} />
-      </Routes>
-    </MemoryRouter>,
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={["/dashboard"]}>
+        <Routes>
+          <Route path="/dashboard" element={<Dashboard />} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
   );
 }
 
@@ -130,7 +134,10 @@ describe("dashboard", () => {
 
     const summarySection = screen.getByLabelText("Income and expense summary");
     expect(within(summarySection).getByText("-200.00")).toBeInTheDocument();
-    expect(screen.getByText(/Income: 1000.00/)).toBeInTheDocument();
+    const totals = screen.getByRole("group", { name: "Totals" });
+    expect(within(totals).getByText("Income")).toBeInTheDocument();
+    expect(within(totals).getByText("1,000.00")).toBeInTheDocument();
+    expect(within(totals).getByText("800.00")).toBeInTheDocument();
 
     const flagsSection = screen.getByLabelText("Missing documentation flags");
     expect(within(flagsSection).getByText(/Mystery charge/)).toBeInTheDocument();
