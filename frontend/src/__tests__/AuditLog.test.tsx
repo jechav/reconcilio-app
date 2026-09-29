@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -7,12 +8,15 @@ import { AuditLog } from "../pages/AuditLog";
 import { saveSession } from "../session";
 
 function renderAuditLog() {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
-    <MemoryRouter initialEntries={["/audit-log"]}>
-      <Routes>
-        <Route path="/audit-log" element={<AuditLog />} />
-      </Routes>
-    </MemoryRouter>,
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={["/audit-log"]}>
+        <Routes>
+          <Route path="/audit-log" element={<AuditLog />} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
   );
 }
 
@@ -78,7 +82,9 @@ describe("audit log", () => {
     saveSession(ownerSession);
     renderAuditLog();
 
-    await waitFor(() => expect(screen.getByText("transaction.category_corrected")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByText("transaction.category_corrected")).toBeInTheDocument(),
+    );
     expect(screen.getByText("document.extracted")).toBeInTheDocument();
     expect(screen.getByText("owner@example.com")).toBeInTheDocument();
     expect(screen.getByText("System")).toBeInTheDocument();
@@ -89,11 +95,15 @@ describe("audit log", () => {
     saveSession(ownerSession);
     renderAuditLog();
 
-    await waitFor(() => expect(screen.getByText("transaction.category_corrected")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByText("transaction.category_corrected")).toBeInTheDocument(),
+    );
 
     await user.click(screen.getByText("transaction.category_corrected"));
 
-    const diff = await screen.findByLabelText("Before/after diff for transaction.category_corrected");
+    const diff = await screen.findByLabelText(
+      "Before/after diff for transaction.category_corrected",
+    );
     expect(within(diff).getByText("category_id")).toBeInTheDocument();
     expect(within(diff).getByText("cat-1")).toBeInTheDocument();
   });
@@ -103,7 +113,9 @@ describe("audit log", () => {
     saveSession(ownerSession);
     renderAuditLog();
 
-    await waitFor(() => expect(screen.getByText("transaction.category_corrected")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByText("transaction.category_corrected")).toBeInTheDocument(),
+    );
 
     await user.type(screen.getByLabelText("Entity type"), "transaction");
     await user.click(screen.getByRole("button", { name: /apply filters/i }));

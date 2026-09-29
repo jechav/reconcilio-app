@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -7,12 +8,15 @@ import { Chat } from "../pages/Chat";
 import { saveSession } from "../session";
 
 function renderChat() {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
-    <MemoryRouter initialEntries={["/chat"]}>
-      <Routes>
-        <Route path="/chat" element={<Chat />} />
-      </Routes>
-    </MemoryRouter>,
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={["/chat"]}>
+        <Routes>
+          <Route path="/chat" element={<Chat />} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
   );
 }
 
@@ -46,8 +50,18 @@ const assistantMessage = {
   role: "assistant" as const,
   content: "You spent $770 on flights (see Transaction abc, Transaction def).",
   citations: [
-    { source_type: "transaction", source_id: "txn-1", document_id: "doc-1", transaction_id: "txn-1" },
-    { source_type: "transaction", source_id: "txn-2", document_id: "doc-2", transaction_id: "txn-2" },
+    {
+      source_type: "transaction",
+      source_id: "txn-1",
+      document_id: "doc-1",
+      transaction_id: "txn-1",
+    },
+    {
+      source_type: "transaction",
+      source_id: "txn-2",
+      document_id: "doc-2",
+      transaction_id: "txn-2",
+    },
   ],
   created_at: "2026-08-20T10:01:05Z",
 };
@@ -72,7 +86,9 @@ beforeEach(() => {
   localStorage.clear();
   vi.stubGlobal(
     "fetch",
-    vi.fn((input: RequestInfo | URL, init?: RequestInit) => mockFetchImplementation(String(input), init)),
+    vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+      mockFetchImplementation(String(input), init),
+    ),
   );
 });
 
@@ -85,7 +101,9 @@ describe("chat", () => {
     saveSession(ownerSession);
     renderChat();
 
-    await waitFor(() => expect(screen.getByRole("button", { name: /8\/20\/2026|20\/08\/2026/i })).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /Aug 20/i })).toBeInTheDocument(),
+    );
   });
 
   it("asks a question and renders the cited answer", async () => {
@@ -98,7 +116,9 @@ describe("chat", () => {
     await user.type(screen.getByLabelText("Question"), "How much did I spend on flights?");
     await user.click(screen.getByRole("button", { name: /^ask$/i }));
 
-    await waitFor(() => expect(screen.getByText(/you spent \$770 on flights/i)).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByText(/you spent \$770 on flights/i)).toBeInTheDocument(),
+    );
 
     const sources = screen.getByLabelText(`Sources for message ${assistantMessage.id}`);
     expect(sources).toBeInTheDocument();
@@ -108,12 +128,14 @@ describe("chat", () => {
 
   it("redirects to login when no session exists", () => {
     render(
-      <MemoryRouter initialEntries={["/chat"]}>
-        <Routes>
-          <Route path="/chat" element={<Chat />} />
-          <Route path="/login" element={<div>Login page</div>} />
-        </Routes>
-      </MemoryRouter>,
+      <QueryClientProvider client={new QueryClient()}>
+        <MemoryRouter initialEntries={["/chat"]}>
+          <Routes>
+            <Route path="/chat" element={<Chat />} />
+            <Route path="/login" element={<div>Login page</div>} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
     );
     expect(screen.getByText("Login page")).toBeInTheDocument();
   });

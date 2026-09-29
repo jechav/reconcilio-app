@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -7,12 +8,15 @@ import { Export } from "../pages/Export";
 import { saveSession } from "../session";
 
 function renderExport() {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
-    <MemoryRouter initialEntries={["/export"]}>
-      <Routes>
-        <Route path="/export" element={<Export />} />
-      </Routes>
-    </MemoryRouter>,
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={["/export"]}>
+        <Routes>
+          <Route path="/export" element={<Export />} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
   );
 }
 
@@ -55,7 +59,10 @@ beforeEach(() => {
     "fetch",
     vi.fn((input: RequestInfo | URL) => mockFetchImplementation(String(input))),
   );
-  vi.stubGlobal("URL.createObjectURL", vi.fn(() => "blob:mock-url"));
+  vi.stubGlobal(
+    "URL.createObjectURL",
+    vi.fn(() => "blob:mock-url"),
+  );
   vi.stubGlobal("URL.revokeObjectURL", vi.fn());
 });
 
@@ -100,7 +107,11 @@ describe("export", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(() =>
-        Promise.resolve({ ok: false, status: 422, json: async () => ({ detail: "start_date must not be after end_date" }) }),
+        Promise.resolve({
+          ok: false,
+          status: 422,
+          json: async () => ({ detail: "start_date must not be after end_date" }),
+        }),
       ),
     );
     const user = userEvent.setup();

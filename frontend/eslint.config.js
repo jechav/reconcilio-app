@@ -11,10 +11,7 @@ export default tseslint.config(
     files: ["src/**/*.{ts,tsx}"],
     languageOptions: { globals: globals.browser },
     plugins: { "react-hooks": reactHooks },
-    // Existing pages call hooks after an early return; warn until they are rewritten on the new stack.
-    rules: Object.fromEntries(
-      Object.keys(reactHooks.configs.recommended.rules).map((rule) => [rule, "warn"]),
-    ),
+    rules: reactHooks.configs.recommended.rules,
   },
   { files: ["src/components/ui/**"], rules: { "react-hooks/rules-of-hooks": "off" } },
 );
