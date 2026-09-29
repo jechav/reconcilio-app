@@ -10,6 +10,7 @@ import {
   Upload,
   type LucideIcon,
 } from "lucide-react";
+import { Suspense } from "react";
 import { Link, NavLink, Navigate, Outlet, useNavigate } from "react-router-dom";
 
 import { clearSession, getSession } from "@/session";
@@ -101,7 +102,16 @@ export function AppShell() {
         </div>
       </aside>
       <main className="min-w-0 flex-1 px-10 py-8">
-        <Outlet />
+        <Suspense
+          fallback={
+            <div role="status" aria-label="Loading page" className="flex flex-col gap-4">
+              <div className="h-9 w-64 animate-pulse rounded-md bg-gray-100" />
+              <div className="h-40 animate-pulse rounded-xl bg-gray-100" />
+            </div>
+          }
+        >
+          <Outlet />
+        </Suspense>
       </main>
     </div>
   );

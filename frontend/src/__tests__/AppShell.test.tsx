@@ -22,9 +22,9 @@ beforeEach(() => {
 });
 
 describe("app shell", () => {
-  it("redirects to login without a session", () => {
+  it("redirects to login without a session", async () => {
     renderAt("/upload");
-    expect(screen.getByRole("heading", { name: /welcome back/i })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: /welcome back/i })).toBeInTheDocument();
     expect(screen.queryByRole("navigation", { name: /main/i })).not.toBeInTheDocument();
   });
 
