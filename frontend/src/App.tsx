@@ -1,5 +1,6 @@
-import { Link, Route, Routes } from "react-router-dom";
+import { Route, Routes } from "react-router-dom";
 
+import { AppShell } from "./components/AppShell";
 import { AuditLog } from "./pages/AuditLog";
 import { Chat } from "./pages/Chat";
 import { Dashboard } from "./pages/Dashboard";
@@ -11,27 +12,17 @@ import { Upload } from "./pages/Upload";
 
 export function App() {
   return (
-    <div>
-      <nav>
-        <Link to="/">Reconcilio</Link>
-        <Link to="/login">Log in</Link>
-        <Link to="/signup">Sign up</Link>
-        <Link to="/upload">Upload</Link>
-        <Link to="/dashboard">Dashboard</Link>
-        <Link to="/export">Export</Link>
-        <Link to="/audit-log">Audit log</Link>
-        <Link to="/chat">Chat</Link>
-      </nav>
-      <Routes>
+    <Routes>
+      <Route path="/login" element={<Login />} />
+      <Route path="/signup" element={<Signup />} />
+      <Route element={<AppShell />}>
         <Route path="/" element={<Home />} />
-        <Route path="/login" element={<Login />} />
-        <Route path="/signup" element={<Signup />} />
         <Route path="/upload" element={<Upload />} />
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/export" element={<Export />} />
         <Route path="/audit-log" element={<AuditLog />} />
         <Route path="/chat" element={<Chat />} />
-      </Routes>
-    </div>
+      </Route>
+    </Routes>
   );
 }
