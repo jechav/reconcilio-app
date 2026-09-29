@@ -301,7 +301,7 @@ describe("transaction detail", () => {
 });
 
 describe("routing", () => {
-  it("shows a 404 page inside the app shell for unknown routes", () => {
+  it("shows a 404 page inside the app shell for unknown routes", async () => {
     const queryClient = new QueryClient();
     render(
       <QueryClientProvider client={queryClient}>
@@ -311,7 +311,7 @@ describe("routing", () => {
       </QueryClientProvider>,
     );
 
-    expect(screen.getByRole("heading", { name: "Page not found" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Page not found" })).toBeInTheDocument();
     expect(screen.getByRole("navigation", { name: "Main" })).toBeInTheDocument();
   });
 });
