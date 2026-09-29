@@ -6,6 +6,8 @@ export interface UserOut {
 export interface OrganizationOut {
   id: string;
   name: string;
+  /** Decimal string in (0, 1]. Snapshot from login/signup; older stored sessions lack it. */
+  confidence_threshold?: string;
 }
 
 export type OrgRole = "owner" | "admin" | "member";
@@ -73,12 +75,7 @@ export function login(email: string, password: string): Promise<TokenResponse> {
 }
 
 export type DocumentType = "invoice_or_receipt" | "bank_statement";
-export type DocumentStatus =
-  | "queued"
-  | "processing"
-  | "needs_review"
-  | "done"
-  | "failed";
+export type DocumentStatus = "queued" | "processing" | "needs_review" | "done" | "failed";
 
 export interface DocumentOut {
   id: string;
@@ -224,7 +221,10 @@ export interface AuditLogFilters {
 /** Chronological AuditLogEntry list for the caller's Organization,
  * owner/admin only (issue #10, AC1/AC3). Every filter is optional and
  * stacks with the others -- see backend/app/routers/audit.py. */
-export function getAuditLog(token: string, filters: AuditLogFilters = {}): Promise<AuditLogEntryOut[]> {
+export function getAuditLog(
+  token: string,
+  filters: AuditLogFilters = {},
+): Promise<AuditLogEntryOut[]> {
   const params = new URLSearchParams();
   if (filters.entityType) params.set("entity_type", filters.entityType);
   if (filters.actor) params.set("actor", filters.actor);
@@ -327,4 +327,149 @@ export async function exportTransactions(
     `transactions_${startDate}_${endDate}.${format}`,
   );
   return { blob, filename };
+}
+
+async function sendJson<T>(
+  method: "PATCH" | "PUT" | "DELETE",
+  path: string,
+  token: string,
+  body?: unknown,
+): Promise<T> {
+  const response = await fetch(`${API_URL}${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    throw new ApiError(await parseErrorDetail(response, path));
+  }
+
+  return (response.status === 204 ? undefined : await response.json()) as T;
+}
+
+export interface CategoryOut {
+  id: string;
+  name: string;
+  created_at: string;
+}
+
+export function listCategories(token: string): Promise<CategoryOut[]> {
+  return getJson<CategoryOut[]>("/categories", token);
+}
+
+/** Owner/admin only (issue #5, AC2). */
+export function createCategory(token: string, name: string): Promise<CategoryOut> {
+  return postJson<CategoryOut>("/categories", { name }, token);
+}
+
+export function updateCategory(token: string, id: string, name: string): Promise<CategoryOut> {
+  return sendJson<CategoryOut>("PATCH", `/categories/${id}`, token, { name });
+}
+
+/** Un-sets the Category on its Transactions; it never deletes them. */
+export function deleteCategory(token: string, id: string): Promise<void> {
+  return sendJson<void>("DELETE", `/categories/${id}`, token);
+}
+
+export interface MembershipOut {
+  id: string;
+  user: UserOut;
+  role: OrgRole;
+  created_at: string;
+}
+
+export interface LlmUsageOut {
+  provider: string;
+  model: string;
+  calls: number;
+}
+
+export function listMembers(token: string): Promise<MembershipOut[]> {
+  return getJson<MembershipOut[]>("/orgs/me/members", token);
+}
+
+/** Owner only. The invitee sets a password through `acceptInvite`. */
+export function inviteMember(token: string, email: string, role: OrgRole): Promise<MembershipOut> {
+  return postJson<MembershipOut>("/orgs/me/members", { email, role }, token);
+}
+
+export function acceptInvite(email: string, password: string): Promise<TokenResponse> {
+  return postJson<TokenResponse>("/auth/accept-invite", { email, password });
+}
+
+/** Owner only: fields below this confidence are sent through llm_refine. */
+export function updateOrgSettings(
+  token: string,
+  confidenceThreshold: number,
+): Promise<OrganizationOut> {
+  return sendJson<OrganizationOut>("PATCH", "/orgs/me/settings", token, {
+    confidence_threshold: confidenceThreshold,
+  });
+}
+
+export function getLlmUsage(token: string): Promise<LlmUsageOut[]> {
+  return getJson<LlmUsageOut[]>("/orgs/me/llm-usage", token);
+}
+
+export type MatchType = "automatic" | "manual";
+
+export interface ReconciliationMatchOut {
+  id: string;
+  bank_transaction_id: string;
+  expense_transaction_id: string;
+  match_type: MatchType;
+  confidence: number;
+  actor: string;
+  created_at: string;
+}
+
+export function listMatches(token: string): Promise<ReconciliationMatchOut[]> {
+  return getJson<ReconciliationMatchOut[]>("/reconciliation/matches", token);
+}
+
+/** Manually links two Transactions the algorithm missed (issue #6, AC6). */
+export function createMatch(
+  token: string,
+  bankTransactionId: string,
+  expenseTransactionId: string,
+): Promise<ReconciliationMatchOut> {
+  return postJson<ReconciliationMatchOut>(
+    "/reconciliation/matches",
+    { bank_transaction_id: bankTransactionId, expense_transaction_id: expenseTransactionId },
+    token,
+  );
+}
+
+export function deleteMatch(token: string, matchId: string): Promise<void> {
+  return sendJson<void>("DELETE", `/reconciliation/matches/${matchId}`, token);
+}
+
+export function listUnmatchedTransactions(
+  token: string,
+  side: DocumentType,
+): Promise<TransactionOut[]> {
+  const params = new URLSearchParams({ side });
+  return getJson<TransactionOut[]>(
+    `/reconciliation/transactions/unmatched?${params.toString()}`,
+    token,
+  );
+}
+
+export function getTransaction(token: string, id: string): Promise<TransactionOut> {
+  return getJson<TransactionOut>(`/transactions/${id}`, token);
+}
+
+/** A human correction is authoritative: it sets confidence to 1.0. */
+export function correctTransactionCategory(
+  token: string,
+  id: string,
+  categoryId: string,
+): Promise<TransactionOut> {
+  return sendJson<TransactionOut>("PUT", `/transactions/${id}/category`, token, {
+    category_id: categoryId,
+  });
 }

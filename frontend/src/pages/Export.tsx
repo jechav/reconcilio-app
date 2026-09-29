@@ -1,9 +1,13 @@
+import { useMutation } from "@tanstack/react-query";
+import { FileJson, FileSpreadsheet, Loader2 } from "lucide-react";
 import { useState } from "react";
-import type { FormEvent } from "react";
 import { Navigate } from "react-router-dom";
 
-import { ApiError, exportTransactions, type ExportFormat } from "../api/client";
-import { getSession } from "../session";
+import { ApiError, exportTransactions, type ExportFormat } from "@/api/client";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { getSession } from "@/session";
 
 function isoDate(d: Date): string {
   return d.toISOString().slice(0, 10);
@@ -30,65 +34,125 @@ function triggerDownload(blob: Blob, filename: string): void {
   URL.revokeObjectURL(url);
 }
 
+const COLUMNS = ["Date", "Description", "Amount", "Category", "Review status", "Match status"];
+
 export function Export() {
   const session = getSession();
-  const [startDate, setStartDate] = useState(defaultStartDate());
-  const [endDate, setEndDate] = useState(defaultEndDate());
-  const [error, setError] = useState<string | null>(null);
-  const [downloading, setDownloading] = useState<ExportFormat | null>(null);
+  const token = session?.access_token ?? "";
+
+  const [startDate, setStartDate] = useState(defaultStartDate);
+  const [endDate, setEndDate] = useState(defaultEndDate);
+
+  const download = useMutation({
+    mutationFn: (format: ExportFormat) => exportTransactions(token, startDate, endDate, format),
+    onSuccess: ({ blob, filename }) => triggerDownload(blob, filename),
+  });
 
   if (!session) {
     return <Navigate to="/login" replace />;
   }
-  const token = session.access_token;
 
-  async function handleExport(event: FormEvent, format: ExportFormat) {
-    event.preventDefault();
-    setError(null);
-    setDownloading(format);
-    try {
-      const { blob, filename } = await exportTransactions(token, startDate, endDate, format);
-      triggerDownload(blob, filename);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Failed to export transactions.");
-    } finally {
-      setDownloading(null);
-    }
-  }
+  const downloading = download.isPending ? download.variables : null;
+  const error = download.error
+    ? download.error instanceof ApiError
+      ? download.error.message
+      : "Failed to export transactions."
+    : null;
 
   return (
-    <div>
-      <h1>Export</h1>
-      <p>
-        Export every Transaction in a date range for an accountant or tax software, including items
-        that still need attention (uncategorized or unmatched), with explicit category, review
-        status, and match status columns.
-      </p>
+    <div className="flex flex-col gap-6">
+      <header className="flex flex-col gap-1">
+        <h1 className="text-[28px] leading-[34px] font-bold tracking-tight text-gray-900">
+          Export
+        </h1>
+        <p className="max-w-2xl text-sm text-gray-500">
+          Export every transaction in a date range for an accountant or tax software, including
+          items that still need attention (uncategorized or unmatched).
+        </p>
+      </header>
 
-      <form aria-label="Export transactions">
-        <label htmlFor="export-start-date">Start date</label>
-        <input
-          id="export-start-date"
-          type="date"
-          value={startDate}
-          onChange={(event) => setStartDate(event.target.value)}
-        />
-        <label htmlFor="export-end-date">End date</label>
-        <input
-          id="export-end-date"
-          type="date"
-          value={endDate}
-          onChange={(event) => setEndDate(event.target.value)}
-        />
-        <button type="submit" onClick={(event) => handleExport(event, "csv")} disabled={downloading !== null}>
-          {downloading === "csv" ? "Exporting…" : "Download CSV"}
-        </button>
-        <button type="submit" onClick={(event) => handleExport(event, "json")} disabled={downloading !== null}>
-          {downloading === "json" ? "Exporting…" : "Download JSON"}
-        </button>
+      <form
+        aria-label="Export transactions"
+        onSubmit={(event) => event.preventDefault()}
+        className="flex max-w-2xl flex-col gap-6 rounded-xl border bg-white p-6"
+      >
+        <div className="flex gap-4">
+          <div className="flex flex-1 flex-col gap-1.5">
+            <Label htmlFor="export-start-date" className="text-[13px] font-semibold text-gray-700">
+              Start date
+            </Label>
+            <Input
+              id="export-start-date"
+              type="date"
+              value={startDate}
+              onChange={(event) => setStartDate(event.target.value)}
+              className="h-10"
+            />
+          </div>
+          <div className="flex flex-1 flex-col gap-1.5">
+            <Label htmlFor="export-end-date" className="text-[13px] font-semibold text-gray-700">
+              End date
+            </Label>
+            <Input
+              id="export-end-date"
+              type="date"
+              value={endDate}
+              onChange={(event) => setEndDate(event.target.value)}
+              className="h-10"
+            />
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-2 rounded-lg bg-gray-50 px-4 py-3">
+          <p className="text-[13px] font-semibold text-gray-700">Included columns</p>
+          <ul className="flex flex-wrap gap-1.5">
+            {COLUMNS.map((column) => (
+              <li
+                key={column}
+                className="rounded-full border bg-white px-2.5 py-0.5 text-xs text-gray-700"
+              >
+                {column}
+              </li>
+            ))}
+          </ul>
+        </div>
+
+        {error && (
+          <p role="alert" className="rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-500">
+            {error}
+          </p>
+        )}
+
+        <div className="flex gap-3">
+          <Button
+            type="button"
+            onClick={() => download.mutate("csv")}
+            disabled={download.isPending}
+            className="h-11 flex-1"
+          >
+            {downloading === "csv" ? (
+              <Loader2 className="animate-spin" aria-hidden />
+            ) : (
+              <FileSpreadsheet aria-hidden />
+            )}
+            {downloading === "csv" ? "Exporting…" : "Download CSV"}
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => download.mutate("json")}
+            disabled={download.isPending}
+            className="h-11 flex-1"
+          >
+            {downloading === "json" ? (
+              <Loader2 className="animate-spin" aria-hidden />
+            ) : (
+              <FileJson aria-hidden />
+            )}
+            {downloading === "json" ? "Exporting…" : "Download JSON"}
+          </Button>
+        </div>
       </form>
-
-      {error && <p role="alert">{error}</p>}
     </div>
   );
 }

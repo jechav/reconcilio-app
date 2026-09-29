@@ -3,7 +3,6 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { Home } from "../pages/Home";
 import { Login } from "../pages/Login";
 import { Signup } from "../pages/Signup";
 
@@ -11,7 +10,7 @@ function renderAt(path: string) {
   return render(
     <MemoryRouter initialEntries={[path]}>
       <Routes>
-        <Route path="/" element={<Home />} />
+        <Route path="/" element={<div>Home page</div>} />
         <Route path="/login" element={<Login />} />
         <Route path="/signup" element={<Signup />} />
       </Routes>
@@ -63,8 +62,8 @@ describe("signup flow", () => {
         }),
       ),
     );
-    await waitFor(() => expect(screen.getByText("Acme Tax")).toBeInTheDocument());
-    expect(screen.getByText(/owner@example.com/)).toBeInTheDocument();
+    expect(await screen.findByText("Home page")).toBeInTheDocument();
+    expect(localStorage.getItem("reconcilio.session")).toContain("Acme Tax");
   });
 
   it("shows the API error message on a failed signup", async () => {
@@ -107,7 +106,8 @@ describe("login flow", () => {
         }),
       ),
     );
-    await waitFor(() => expect(screen.getByText("Acme Tax")).toBeInTheDocument());
+    expect(await screen.findByText("Home page")).toBeInTheDocument();
+    expect(localStorage.getItem("reconcilio.session")).toContain("Acme Tax");
   });
 
   it("shows an error message on invalid credentials", async () => {

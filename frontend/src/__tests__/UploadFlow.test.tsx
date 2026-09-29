@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -7,12 +8,15 @@ import { Upload } from "../pages/Upload";
 import { saveSession } from "../session";
 
 function renderUpload() {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
-    <MemoryRouter initialEntries={["/upload"]}>
-      <Routes>
-        <Route path="/upload" element={<Upload />} />
-      </Routes>
-    </MemoryRouter>,
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={["/upload"]}>
+        <Routes>
+          <Route path="/upload" element={<Upload />} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
   );
 }
 
@@ -51,7 +55,10 @@ describe("upload flow", () => {
     fetchMock
       .mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ document: queuedDocument, upload_url: "https://minio.local/presigned" }),
+        json: async () => ({
+          document: queuedDocument,
+          upload_url: "https://minio.local/presigned",
+        }),
       })
       .mockResolvedValueOnce({ ok: true, json: async () => ({}) }) // PUT to MinIO
       .mockResolvedValueOnce({
@@ -71,12 +78,13 @@ describe("upload flow", () => {
     await user.upload(fileInput, file);
     await user.click(screen.getByRole("button", { name: /upload/i }));
 
-    await waitFor(() => expect(screen.getByTestId("document-status")).toHaveTextContent("processing"));
-
-    await waitFor(
-      () => expect(screen.getByTestId("document-status")).toHaveTextContent("done"),
-      { timeout: 5000 },
+    await waitFor(() =>
+      expect(screen.getByTestId("document-status")).toHaveTextContent("processing"),
     );
+
+    await waitFor(() => expect(screen.getByTestId("document-status")).toHaveTextContent("done"), {
+      timeout: 5000,
+    });
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
