@@ -6,6 +6,8 @@ export interface UserOut {
 export interface OrganizationOut {
   id: string;
   name: string;
+  /** Decimal string in (0, 1]. Snapshot from login/signup; older stored sessions lack it. */
+  confidence_threshold?: string;
 }
 
 export type OrgRole = "owner" | "admin" | "member";
@@ -328,7 +330,7 @@ export async function exportTransactions(
 }
 
 async function sendJson<T>(
-  method: "PATCH" | "DELETE",
+  method: "PATCH" | "PUT" | "DELETE",
   path: string,
   token: string,
   body?: unknown,
@@ -371,4 +373,103 @@ export function updateCategory(token: string, id: string, name: string): Promise
 /** Un-sets the Category on its Transactions; it never deletes them. */
 export function deleteCategory(token: string, id: string): Promise<void> {
   return sendJson<void>("DELETE", `/categories/${id}`, token);
+}
+
+export interface MembershipOut {
+  id: string;
+  user: UserOut;
+  role: OrgRole;
+  created_at: string;
+}
+
+export interface LlmUsageOut {
+  provider: string;
+  model: string;
+  calls: number;
+}
+
+export function listMembers(token: string): Promise<MembershipOut[]> {
+  return getJson<MembershipOut[]>("/orgs/me/members", token);
+}
+
+/** Owner only. The invitee sets a password through `acceptInvite`. */
+export function inviteMember(token: string, email: string, role: OrgRole): Promise<MembershipOut> {
+  return postJson<MembershipOut>("/orgs/me/members", { email, role }, token);
+}
+
+export function acceptInvite(email: string, password: string): Promise<TokenResponse> {
+  return postJson<TokenResponse>("/auth/accept-invite", { email, password });
+}
+
+/** Owner only: fields below this confidence are sent through llm_refine. */
+export function updateOrgSettings(
+  token: string,
+  confidenceThreshold: number,
+): Promise<OrganizationOut> {
+  return sendJson<OrganizationOut>("PATCH", "/orgs/me/settings", token, {
+    confidence_threshold: confidenceThreshold,
+  });
+}
+
+export function getLlmUsage(token: string): Promise<LlmUsageOut[]> {
+  return getJson<LlmUsageOut[]>("/orgs/me/llm-usage", token);
+}
+
+export type MatchType = "automatic" | "manual";
+
+export interface ReconciliationMatchOut {
+  id: string;
+  bank_transaction_id: string;
+  expense_transaction_id: string;
+  match_type: MatchType;
+  confidence: number;
+  actor: string;
+  created_at: string;
+}
+
+export function listMatches(token: string): Promise<ReconciliationMatchOut[]> {
+  return getJson<ReconciliationMatchOut[]>("/reconciliation/matches", token);
+}
+
+/** Manually links two Transactions the algorithm missed (issue #6, AC6). */
+export function createMatch(
+  token: string,
+  bankTransactionId: string,
+  expenseTransactionId: string,
+): Promise<ReconciliationMatchOut> {
+  return postJson<ReconciliationMatchOut>(
+    "/reconciliation/matches",
+    { bank_transaction_id: bankTransactionId, expense_transaction_id: expenseTransactionId },
+    token,
+  );
+}
+
+export function deleteMatch(token: string, matchId: string): Promise<void> {
+  return sendJson<void>("DELETE", `/reconciliation/matches/${matchId}`, token);
+}
+
+export function listUnmatchedTransactions(
+  token: string,
+  side: DocumentType,
+): Promise<TransactionOut[]> {
+  const params = new URLSearchParams({ side });
+  return getJson<TransactionOut[]>(
+    `/reconciliation/transactions/unmatched?${params.toString()}`,
+    token,
+  );
+}
+
+export function getTransaction(token: string, id: string): Promise<TransactionOut> {
+  return getJson<TransactionOut>(`/transactions/${id}`, token);
+}
+
+/** A human correction is authoritative: it sets confidence to 1.0. */
+export function correctTransactionCategory(
+  token: string,
+  id: string,
+  categoryId: string,
+): Promise<TransactionOut> {
+  return sendJson<TransactionOut>("PUT", `/transactions/${id}/category`, token, {
+    category_id: categoryId,
+  });
 }

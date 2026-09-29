@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { X } from "lucide-react";
 import { useState, type FormEvent, type ReactNode } from "react";
-import { Navigate } from "react-router-dom";
+import { Link, Navigate } from "react-router-dom";
 
 import {
   ApiError,
@@ -16,6 +16,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { formatAmount, formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { getSession } from "@/session";
 
@@ -33,26 +34,8 @@ function defaultEndDate(): string {
   return isoDate(new Date());
 }
 
-const amountFormat = new Intl.NumberFormat("en-US", {
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
-
-function formatAmount(value: string): string {
-  return amountFormat.format(Number(value));
-}
-
 function isZero(value: string): boolean {
   return Number(value) === 0;
-}
-
-function formatDate(iso: string): string {
-  return new Date(`${iso}T00:00:00Z`).toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    timeZone: "UTC",
-  });
 }
 
 function errorMessage(error: unknown, fallback: string): string | null {
@@ -106,7 +89,12 @@ function FlagRow({
   return (
     <li className="flex items-center gap-3 border-t border-black/5 py-2.5 first:border-t-0">
       <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-semibold text-gray-900">{transaction.description}</p>
+        <Link
+          to={`/transactions/${transaction.id}`}
+          className="block truncate text-sm font-semibold text-gray-900 hover:underline"
+        >
+          {transaction.description}
+        </Link>
         <p className="text-xs text-gray-700">{formatDate(transaction.txn_date)}</p>
       </div>
       <span className="text-sm tabular-nums text-gray-900">{formatAmount(transaction.amount)}</span>
@@ -398,6 +386,12 @@ export function Dashboard() {
                 tone="rose"
                 onViewDocument={setDocumentId}
               />
+              <Link
+                to="/reconciliation"
+                className="pt-1 text-sm font-semibold text-navy-600 hover:underline"
+              >
+                Review in Reconciliation →
+              </Link>
             </>
           ) : (
             <>
@@ -439,9 +433,12 @@ export function Dashboard() {
                   <span className="w-28 text-sm text-gray-500">
                     {formatDate(transaction.txn_date)}
                   </span>
-                  <span className="min-w-0 flex-1 truncate text-sm text-gray-900">
+                  <Link
+                    to={`/transactions/${transaction.id}`}
+                    className="min-w-0 flex-1 truncate text-sm text-gray-900 hover:underline"
+                  >
                     {transaction.description}
-                  </span>
+                  </Link>
                   <span className="w-28 text-right text-sm font-semibold tabular-nums text-gray-900">
                     {formatAmount(transaction.amount)}
                   </span>

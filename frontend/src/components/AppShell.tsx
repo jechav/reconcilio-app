@@ -5,6 +5,7 @@ import {
   LayoutDashboard,
   LogOut,
   MessageSquare,
+  Settings,
   Tag,
   Upload,
   type LucideIcon,
@@ -23,10 +24,12 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { to: "/upload", label: "Upload", icon: Upload },
+  { to: "/reconciliation", label: "Reconciliation", icon: ArrowLeftRight },
   { to: "/categories", label: "Categories", icon: Tag },
   { to: "/chat", label: "Ask your books", icon: MessageSquare },
   { to: "/export", label: "Export", icon: Download },
   { to: "/audit-log", label: "Audit log", icon: History },
+  { to: "/organization", label: "Organization", icon: Settings },
 ];
 
 function initials(email: string): string {
