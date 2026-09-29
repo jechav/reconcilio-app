@@ -1,0 +1,61 @@
+@import "tailwindcss";
+
+/* Design tokens from the "Reconcilio Design System" Paper file (maritime: fog gray x deep navy). */
+@theme {
+  --font-sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  --color-gray-50: #f9fafb;
+  --color-gray-100: #f3f4f6;
+  --color-gray-200: #e5e7eb;
+  --color-gray-300: #d1d5db;
+  --color-gray-500: #6b7280;
+  --color-gray-700: #374151;
+  --color-gray-900: #1f2937;
+
+  --color-navy-50: #f0f6fb;
+  --color-navy-100: #e0edf5;
+  --color-navy-600: #1b3a5c;
+
+  --color-teal-50: #f0fdfa;
+  --color-teal-500: #14b8a6;
+  --color-amber-50: #fffbeb;
+  --color-amber-500: #f59e0b;
+  --color-rose-50: #fff1f2;
+  --color-rose-500: #f43f5e;
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  /* semantic aliases used by shadcn components */
+  --color-background: var(--color-gray-50);
+  --color-foreground: var(--color-gray-900);
+  --color-card: #ffffff;
+  --color-card-foreground: var(--color-gray-900);
+  --color-popover: #ffffff;
+  --color-popover-foreground: var(--color-gray-900);
+  --color-primary: var(--color-navy-600);
+  --color-primary-foreground: #ffffff;
+  --color-secondary: var(--color-gray-100);
+  --color-secondary-foreground: var(--color-gray-700);
+  --color-muted: var(--color-gray-100);
+  --color-muted-foreground: var(--color-gray-500);
+  --color-accent: var(--color-navy-50);
+  --color-accent-foreground: var(--color-navy-600);
+  --color-destructive: var(--color-rose-500);
+  --color-border: var(--color-gray-200);
+  --color-input: var(--color-gray-300);
+  --color-ring: var(--color-navy-600);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+}
