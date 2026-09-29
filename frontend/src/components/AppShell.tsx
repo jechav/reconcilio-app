@@ -5,6 +5,7 @@ import {
   LayoutDashboard,
   LogOut,
   MessageSquare,
+  Tag,
   Upload,
   type LucideIcon,
 } from "lucide-react";
@@ -22,6 +23,7 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { to: "/upload", label: "Upload", icon: Upload },
+  { to: "/categories", label: "Categories", icon: Tag },
   { to: "/chat", label: "Ask your books", icon: MessageSquare },
   { to: "/export", label: "Export", icon: Download },
   { to: "/audit-log", label: "Audit log", icon: History },

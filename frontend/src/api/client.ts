@@ -73,12 +73,7 @@ export function login(email: string, password: string): Promise<TokenResponse> {
 }
 
 export type DocumentType = "invoice_or_receipt" | "bank_statement";
-export type DocumentStatus =
-  | "queued"
-  | "processing"
-  | "needs_review"
-  | "done"
-  | "failed";
+export type DocumentStatus = "queued" | "processing" | "needs_review" | "done" | "failed";
 
 export interface DocumentOut {
   id: string;
@@ -224,7 +219,10 @@ export interface AuditLogFilters {
 /** Chronological AuditLogEntry list for the caller's Organization,
  * owner/admin only (issue #10, AC1/AC3). Every filter is optional and
  * stacks with the others -- see backend/app/routers/audit.py. */
-export function getAuditLog(token: string, filters: AuditLogFilters = {}): Promise<AuditLogEntryOut[]> {
+export function getAuditLog(
+  token: string,
+  filters: AuditLogFilters = {},
+): Promise<AuditLogEntryOut[]> {
   const params = new URLSearchParams();
   if (filters.entityType) params.set("entity_type", filters.entityType);
   if (filters.actor) params.set("actor", filters.actor);
@@ -327,4 +325,50 @@ export async function exportTransactions(
     `transactions_${startDate}_${endDate}.${format}`,
   );
   return { blob, filename };
+}
+
+async function sendJson<T>(
+  method: "PATCH" | "DELETE",
+  path: string,
+  token: string,
+  body?: unknown,
+): Promise<T> {
+  const response = await fetch(`${API_URL}${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    throw new ApiError(await parseErrorDetail(response, path));
+  }
+
+  return (response.status === 204 ? undefined : await response.json()) as T;
+}
+
+export interface CategoryOut {
+  id: string;
+  name: string;
+  created_at: string;
+}
+
+export function listCategories(token: string): Promise<CategoryOut[]> {
+  return getJson<CategoryOut[]>("/categories", token);
+}
+
+/** Owner/admin only (issue #5, AC2). */
+export function createCategory(token: string, name: string): Promise<CategoryOut> {
+  return postJson<CategoryOut>("/categories", { name }, token);
+}
+
+export function updateCategory(token: string, id: string, name: string): Promise<CategoryOut> {
+  return sendJson<CategoryOut>("PATCH", `/categories/${id}`, token, { name });
+}
+
+/** Un-sets the Category on its Transactions; it never deletes them. */
+export function deleteCategory(token: string, id: string): Promise<void> {
+  return sendJson<void>("DELETE", `/categories/${id}`, token);
 }
