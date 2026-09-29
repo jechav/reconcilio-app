@@ -21,7 +21,7 @@ beforeEach(() => {
 describe("app shell", () => {
   it("redirects to login without a session", () => {
     renderAt("/upload");
-    expect(screen.getByRole("heading", { name: /log in/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /welcome back/i })).toBeInTheDocument();
     expect(screen.queryByRole("navigation", { name: /main/i })).not.toBeInTheDocument();
   });
 
@@ -45,7 +45,7 @@ describe("app shell", () => {
 
     await user.click(screen.getByRole("button", { name: /log out/i }));
 
-    expect(await screen.findByRole("heading", { name: /log in/i })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: /welcome back/i })).toBeInTheDocument();
     expect(localStorage.getItem("reconcilio.session")).toBeNull();
   });
 });

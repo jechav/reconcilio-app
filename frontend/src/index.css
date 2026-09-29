@@ -1,5 +1,8 @@
 @import "tailwindcss";
 
+/* Light theme only for now: dark styles apply solely under an explicit .dark class, not the OS setting. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 /* Design tokens from the "Reconcilio Design System" Paper file (maritime: fog gray x deep navy). */
 @theme {
   --font-sans: system-ui, -apple-system, "Segoe UI", sans-serif;

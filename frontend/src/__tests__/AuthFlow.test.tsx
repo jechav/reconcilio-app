@@ -48,18 +48,20 @@ describe("signup flow", () => {
     await user.type(screen.getByLabelText(/organization name/i), "Acme Tax");
     await user.type(screen.getByLabelText(/email/i), "owner@example.com");
     await user.type(screen.getByLabelText(/password/i), "correct-horse");
-    await user.click(screen.getByRole("button", { name: /sign up/i }));
+    await user.click(screen.getByRole("button", { name: /create organization/i }));
 
-    expect(fetch).toHaveBeenCalledWith(
-      expect.stringContaining("/auth/signup"),
-      expect.objectContaining({
-        method: "POST",
-        body: JSON.stringify({
-          email: "owner@example.com",
-          password: "correct-horse",
-          org_name: "Acme Tax",
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        expect.stringContaining("/auth/signup"),
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({
+            email: "owner@example.com",
+            password: "correct-horse",
+            org_name: "Acme Tax",
+          }),
         }),
-      }),
+      ),
     );
     await waitFor(() => expect(screen.getByText("Acme Tax")).toBeInTheDocument());
     expect(screen.getByText(/owner@example.com/)).toBeInTheDocument();
@@ -77,7 +79,7 @@ describe("signup flow", () => {
     await user.type(screen.getByLabelText(/organization name/i), "Acme Tax");
     await user.type(screen.getByLabelText(/email/i), "owner@example.com");
     await user.type(screen.getByLabelText(/password/i), "correct-horse");
-    await user.click(screen.getByRole("button", { name: /sign up/i }));
+    await user.click(screen.getByRole("button", { name: /create organization/i }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Email already registered");
   });
@@ -96,12 +98,14 @@ describe("login flow", () => {
     await user.type(screen.getByLabelText(/password/i), "correct-horse");
     await user.click(screen.getByRole("button", { name: /log in/i }));
 
-    expect(fetch).toHaveBeenCalledWith(
-      expect.stringContaining("/auth/login"),
-      expect.objectContaining({
-        method: "POST",
-        body: JSON.stringify({ email: "owner@example.com", password: "correct-horse" }),
-      }),
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        expect.stringContaining("/auth/login"),
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ email: "owner@example.com", password: "correct-horse" }),
+        }),
+      ),
     );
     await waitFor(() => expect(screen.getByText("Acme Tax")).toBeInTheDocument());
   });

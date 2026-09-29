@@ -1,48 +1,82 @@
-import { useState } from "react";
-import type { FormEvent } from "react";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { Loader2 } from "lucide-react";
+import { useForm } from "react-hook-form";
+import { Link } from "react-router-dom";
+import { z } from "zod";
 
-import { login } from "../api/client";
-import { useAuthSubmit } from "../useAuthSubmit";
+import { login } from "@/api/client";
+import { AuthLayout } from "@/components/AuthLayout";
+import { FormField } from "@/components/FormField";
+import { Button } from "@/components/ui/button";
+import { useAuthSubmit } from "@/useAuthSubmit";
+
+const schema = z.object({
+  email: z.string().min(1, "Enter your email.").email("Enter a valid email address."),
+  password: z.string().min(1, "Enter your password."),
+});
+
+type LoginValues = z.infer<typeof schema>;
 
 export function Login() {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
   const { error, submitting, run } = useAuthSubmit();
-
-  function handleSubmit(event: FormEvent) {
-    event.preventDefault();
-    void run(() => login(email, password));
-  }
+  const {
+    register,
+    handleSubmit,
+    formState: { errors },
+  } = useForm<LoginValues>({ resolver: zodResolver(schema) });
 
   return (
-    <form onSubmit={handleSubmit} aria-label="Log in">
-      <h1>Log in</h1>
+    <AuthLayout>
+      <div className="flex flex-col gap-1.5">
+        <h1 className="text-[28px] leading-[34px] font-bold tracking-tight text-gray-900">
+          Welcome back
+        </h1>
+        <p className="text-sm text-gray-500">Log in to your organization.</p>
+      </div>
 
-      <label htmlFor="login-email">Email</label>
-      <input
-        id="login-email"
-        name="email"
-        type="email"
-        required
-        value={email}
-        onChange={(event) => setEmail(event.target.value)}
-      />
+      <form
+        aria-label="Log in"
+        noValidate
+        onSubmit={handleSubmit((values) => run(() => login(values.email, values.password)))}
+        className="flex flex-col gap-6"
+      >
+        <div className="flex flex-col gap-4">
+          <FormField
+            id="login-email"
+            label="Email"
+            type="email"
+            autoComplete="email"
+            error={errors.email?.message}
+            {...register("email")}
+          />
+          <FormField
+            id="login-password"
+            label="Password"
+            type="password"
+            autoComplete="current-password"
+            error={errors.password?.message}
+            {...register("password")}
+          />
+        </div>
 
-      <label htmlFor="login-password">Password</label>
-      <input
-        id="login-password"
-        name="password"
-        type="password"
-        required
-        value={password}
-        onChange={(event) => setPassword(event.target.value)}
-      />
+        {error && (
+          <p role="alert" className="rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-500">
+            {error}
+          </p>
+        )}
 
-      {error && <p role="alert">{error}</p>}
+        <Button type="submit" disabled={submitting} className="h-11 w-full">
+          {submitting && <Loader2 className="animate-spin" aria-hidden />}
+          {submitting ? "Logging in…" : "Log in"}
+        </Button>
+      </form>
 
-      <button type="submit" disabled={submitting}>
-        {submitting ? "Logging in…" : "Log in"}
-      </button>
-    </form>
+      <p className="text-center text-sm text-gray-500">
+        New to Reconcilio?{" "}
+        <Link to="/signup" className="font-semibold text-navy-600 hover:underline">
+          Create an organization
+        </Link>
+      </p>
+    </AuthLayout>
   );
 }
