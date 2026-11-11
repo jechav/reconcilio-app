@@ -41,6 +41,18 @@ jobs:
           python-version: "3.12"
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
+      # Started by hand, not as a service container: the minio image needs a
+      # `server /data` command, which service containers can't pass. The
+      # document upload tests call ensure_bucket() against it.
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio -p 9000:9000 minio/minio server /data
+          for _ in $(seq 1 30); do
+            curl -sf http://localhost:9000/minio/health/live && exit 0
+            sleep 1
+          done
+          docker logs minio
+          exit 1
       - run: uv sync --locked
       - run: uv run pytest
       - run: uv run mypy app
