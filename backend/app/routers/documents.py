@@ -1,39 +1,46 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from litestar import Router, get, post
+from litestar.di import NamedDependency
+from litestar.exceptions import HTTPException
+from litestar.params import FromPath, JSONBody
+from litestar.status_codes import (
+    HTTP_200_OK,
+    HTTP_201_CREATED,
+    HTTP_404_NOT_FOUND,
+    HTTP_409_CONFLICT,
+    HTTP_422_UNPROCESSABLE_ENTITY,
+)
 from sqlalchemy.orm import Session
 
+from app.auth import Principal
 from app.celery_app import process_document
-from app.database import get_db
-from app.deps import Principal, get_current_principal
 from app.documents import validate_upload
 from app.models import Document, DocumentStatus
 from app.schemas import DocumentOut, DocumentUploadRequest, DocumentUploadResponse
 from app.scoping import org_scoped_select
 from app.storage import presigned_put_url
 
-router = APIRouter(prefix="/documents", tags=["documents"])
 
-
-@router.post("", response_model=DocumentUploadResponse, status_code=status.HTTP_201_CREATED)
+@post("/", status_code=HTTP_201_CREATED, sync_to_thread=True)
 def request_upload(
-    payload: DocumentUploadRequest,
-    principal: Principal = Depends(get_current_principal),
-    db: Session = Depends(get_db),
+    data: JSONBody[DocumentUploadRequest],
+    principal: NamedDependency[Principal],
+    db: NamedDependency[Session],
 ) -> DocumentUploadResponse:
-    error = validate_upload(payload.filename, payload.content_type, payload.size_bytes)
+    error = validate_upload(data.filename, data.content_type, data.size_bytes)
     if error is not None:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, error)
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail=error)
 
-    minio_key = f"{principal.org_id}/{uuid.uuid4()}-{payload.filename}"
+    minio_key = f"{principal.org_id}/{uuid.uuid4()}-{data.filename}"
 
     document = Document(
         org_id=principal.org_id,
-        filename=payload.filename,
-        content_type=payload.content_type,
-        size_bytes=payload.size_bytes,
+        filename=data.filename,
+        content_type=data.content_type,
+        size_bytes=data.size_bytes,
         minio_key=minio_key,
-        doc_type=payload.doc_type,
+        doc_type=data.doc_type,
     )
     db.add(document)
     db.commit()
@@ -44,38 +51,47 @@ def request_upload(
     return DocumentUploadResponse(document=DocumentOut.model_validate(document), upload_url=upload_url)
 
 
-@router.post("/{document_id}/complete", response_model=DocumentOut)
+@post("/{document_id:uuid}/complete", status_code=HTTP_200_OK, sync_to_thread=True)
 def complete_upload(
-    document_id: uuid.UUID,
-    principal: Principal = Depends(get_current_principal),
-    db: Session = Depends(get_db),
-) -> Document:
+    document_id: FromPath[uuid.UUID],
+    principal: NamedDependency[Principal],
+    db: NamedDependency[Session],
+) -> DocumentOut:
     document = (
         db.execute(org_scoped_select(Document, principal.org_id).where(Document.id == document_id))
         .scalars()
         .one_or_none()
     )
     if document is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="Document not found")
     if document.status != DocumentStatus.queued:
-        raise HTTPException(status.HTTP_409_CONFLICT, "Upload already completed for this document")
+        raise HTTPException(
+            status_code=HTTP_409_CONFLICT, detail="Upload already completed for this document"
+        )
 
     process_document.delay(str(document.id))
     db.refresh(document)
-    return document
+    return DocumentOut.model_validate(document)
 
 
-@router.get("/{document_id}", response_model=DocumentOut)
+@get("/{document_id:uuid}", sync_to_thread=True)
 def get_document(
-    document_id: uuid.UUID,
-    principal: Principal = Depends(get_current_principal),
-    db: Session = Depends(get_db),
-) -> Document:
+    document_id: FromPath[uuid.UUID],
+    principal: NamedDependency[Principal],
+    db: NamedDependency[Session],
+) -> DocumentOut:
     document = (
         db.execute(org_scoped_select(Document, principal.org_id).where(Document.id == document_id))
         .scalars()
         .one_or_none()
     )
     if document is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
-    return document
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="Document not found")
+    return DocumentOut.model_validate(document)
+
+
+router = Router(
+    path="/documents",
+    route_handlers=[request_upload, complete_upload, get_document],
+    tags=["documents"],
+)
