@@ -41,12 +41,13 @@ jobs:
           python-version: "3.12"
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
-      # Started by hand, not as a service container: the minio image needs a
-      # `server /data` command, which service containers can't pass. The
-      # document upload tests call ensure_bucket() against it.
+      # Started by hand, not as a service container: the image needs a
+      # `server <dir>` command, which service containers can't pass. The
+      # document upload tests call ensure_bucket() against it. Uses the
+      # Chainguard build because minio/minio is no longer on Docker Hub.
       - name: Start MinIO
         run: |
-          docker run -d --name minio -p 9000:9000 minio/minio server /data
+          docker run -d --name minio -p 9000:9000 chainguard/minio server /tmp/data
           for _ in $(seq 1 30); do
             curl -sf http://localhost:9000/minio/health/live && exit 0
             sleep 1
