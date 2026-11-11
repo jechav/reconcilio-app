@@ -53,7 +53,9 @@ ralph:in-progress, assigned          [claimed; the only in-flight ticket]
         |     -> ralph:pr-open, assigned  [executor reports back; worktree left in place]
         |         |
         |         |  orchestrator, immediately, before claiming anything else:
+        |         |    gh pr checks <pr> --watch --fail-fast   (CI: .github/workflows/ci.yml)
         |         |    gh pr merge <pr> --merge
+        |         |    on a failed check: do not merge -> ralph:failed
         |         |    on conflict: resolve in the worktree, re-validate, retry
         |         v
         |     merged to main -> issue auto-closes (PR body's "Closes #n")

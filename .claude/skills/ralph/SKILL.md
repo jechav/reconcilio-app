@@ -86,10 +86,18 @@ and repeat until nothing eligible remains.
       - *Validation failure*: nothing further to do — the executor already
         left it in `ralph:failed` per its own procedure. Go back to (a) to
         pick the next ticket.
-      - *PR opened*: merge it immediately, before claiming anything else:
+      - *PR opened*: wait for CI, then merge, before claiming anything
+        else:
         ```bash
+        gh pr checks <pr-number> --watch --fail-fast
         gh pr merge <pr-number> --merge
         ```
+        - On a failed check: do not merge. Treat it as a validation
+          failure — move the issue from `ralph:pr-open` to `ralph:failed`,
+          unassign, and comment with the failing job and worktree path.
+          Go back to (a).
+        - If `main` moved and GitHub reports the branch is out of date:
+          `gh pr update-branch <pr-number>`, then wait for checks again.
         - On success: `git worktree remove <worktree-path>`. The issue
           auto-closes via the PR's `Closes #n`. This may have just
           unblocked other issues — go back to (a).
