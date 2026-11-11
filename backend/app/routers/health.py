@@ -1,22 +1,30 @@
-from fastapi import APIRouter, Depends, Response, status
+from litestar import Response, Router, get
+from litestar.di import NamedDependency
+from litestar.status_codes import HTTP_503_SERVICE_UNAVAILABLE
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.database import get_db
 
-router = APIRouter(tags=["health"])
-
-
-@router.get("/health")
+@get("/health", sync_to_thread=False)
 def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@router.get("/ready")
-def ready(response: Response, db: Session = Depends(get_db)) -> dict[str, str]:
+@get("/ready", sync_to_thread=True)
+def ready(db: NamedDependency[Session]) -> Response[dict[str, str]]:
     try:
         db.execute(text("SELECT 1"))
     except Exception:
-        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-        return {"status": "not ready", "database": "unreachable"}
-    return {"status": "ready", "database": "ok"}
+        return Response(
+            {"status": "not ready", "database": "unreachable"},
+            status_code=HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    return Response({"status": "ready", "database": "ok"})
+
+
+router = Router(
+    path="/",
+    route_handlers=[health, ready],
+    tags=["health"],
+    opt={"exclude_from_auth": True},
+)

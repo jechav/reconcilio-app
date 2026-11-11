@@ -1,21 +1,17 @@
+"""FastAPI dependencies for routers not yet ported to Litestar. Deleted in
+the cleanup slice; ported routers use app/auth.py instead."""
+
 import uuid
-from dataclasses import dataclass
 
 import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from app.auth import Principal
 from app.models import OrgRole
 from app.security import decode_access_token
 
 bearer_scheme = HTTPBearer(auto_error=False)
-
-
-@dataclass(frozen=True)
-class Principal:
-    user_id: uuid.UUID
-    org_id: uuid.UUID
-    role: OrgRole
 
 
 def get_current_principal(
