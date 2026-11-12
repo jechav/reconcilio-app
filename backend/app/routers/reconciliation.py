@@ -1,71 +1,74 @@
 import uuid
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from litestar import Router, delete, get, post
+from litestar.di import NamedDependency
+from litestar.exceptions import HTTPException
+from litestar.params import FromPath, JSONBody, QueryParameter
+from litestar.status_codes import HTTP_404_NOT_FOUND, HTTP_422_UNPROCESSABLE_ENTITY
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.database import get_db
-from app.deps import Principal, get_current_principal
+from app.auth import Principal
 from app.models import Document, DocumentType, ReconciliationMatch, Transaction
 from app.reconciliation import ReconciliationError, create_manual_match, remove_manual_match
 from app.schemas import ManualMatchRequest, ReconciliationMatchOut, TransactionOut
 from app.scoping import org_scoped_select
 
-router = APIRouter(prefix="/reconciliation", tags=["reconciliation"])
 
-
-@router.get("/matches", response_model=list[ReconciliationMatchOut])
+@get("/matches", sync_to_thread=True)
 def list_matches(
-    principal: Principal = Depends(get_current_principal),
-    db: Session = Depends(get_db),
-) -> list[ReconciliationMatch]:
+    principal: NamedDependency[Principal],
+    db: NamedDependency[Session],
+) -> list[ReconciliationMatchOut]:
     stmt = org_scoped_select(ReconciliationMatch, principal.org_id).order_by(
         ReconciliationMatch.created_at.desc()
     )
-    return list(db.execute(stmt).scalars())
+    return [ReconciliationMatchOut.model_validate(match) for match in db.execute(stmt).scalars()]
 
 
-@router.post("/matches", response_model=ReconciliationMatchOut, status_code=status.HTTP_201_CREATED)
+@post("/matches", sync_to_thread=True)
 def create_match(
-    payload: ManualMatchRequest,
-    principal: Principal = Depends(get_current_principal),
-    db: Session = Depends(get_db),
-) -> ReconciliationMatch:
+    data: JSONBody[ManualMatchRequest],
+    principal: NamedDependency[Principal],
+    db: NamedDependency[Session],
+) -> ReconciliationMatchOut:
     """A user manually links two Transactions the algorithm missed
     (issue #6, AC6). Not subject to the algorithm's amount/date/vendor
     criteria -- only the one-to-one rule still applies."""
     try:
-        return create_manual_match(
+        match = create_manual_match(
             db,
             org_id=principal.org_id,
-            bank_transaction_id=payload.bank_transaction_id,
-            expense_transaction_id=payload.expense_transaction_id,
+            bank_transaction_id=data.bank_transaction_id,
+            expense_transaction_id=data.expense_transaction_id,
             actor=str(principal.user_id),
         )
     except ReconciliationError as exc:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return ReconciliationMatchOut.model_validate(match)
 
 
-@router.delete("/matches/{match_id}", status_code=status.HTTP_204_NO_CONTENT)
+@delete("/matches/{match_id:uuid}", sync_to_thread=True)
 def delete_match(
-    match_id: uuid.UUID,
-    principal: Principal = Depends(get_current_principal),
-    db: Session = Depends(get_db),
+    match_id: FromPath[uuid.UUID],
+    principal: NamedDependency[Principal],
+    db: NamedDependency[Session],
 ) -> None:
     """A user removes a ReconciliationMatch the algorithm (or another user)
     got wrong -- automatic or manual matches can both be unmatched this way."""
     try:
         remove_manual_match(db, org_id=principal.org_id, match_id=match_id, actor=str(principal.user_id))
     except ReconciliationError as exc:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
-@router.get("/transactions/unmatched", response_model=list[TransactionOut])
+@get("/transactions/unmatched", sync_to_thread=True)
 def list_unmatched_transactions(
-    side: DocumentType = Query(..., description="bank_statement or invoice_or_receipt"),
-    principal: Principal = Depends(get_current_principal),
-    db: Session = Depends(get_db),
-) -> list[Transaction]:
+    side: Annotated[DocumentType, QueryParameter(description="bank_statement or invoice_or_receipt")],
+    principal: NamedDependency[Principal],
+    db: NamedDependency[Session],
+) -> list[TransactionOut]:
     """Unmatched Transactions on either side are the tax-risk signal
     (CONTEXT.md, Expense-source Transaction) -- both sides are queryable
     here (issue #6, AC5)."""
@@ -83,4 +86,11 @@ def list_unmatched_transactions(
         .order_by(Transaction.txn_date)
     )
     transactions = list(db.execute(stmt).scalars())
-    return [t for t in transactions if t.id not in excluded]
+    return [TransactionOut.model_validate(t) for t in transactions if t.id not in excluded]
+
+
+router = Router(
+    path="/reconciliation",
+    route_handlers=[list_matches, create_match, delete_match, list_unmatched_transactions],
+    tags=["reconciliation"],
+)
