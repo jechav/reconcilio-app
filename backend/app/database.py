@@ -13,14 +13,6 @@ class Base(DeclarativeBase):
     pass
 
 
-def get_db() -> Generator[Session, None, None]:
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
 def session_provider(
     session_factory: Callable[[], Session],
 ) -> Callable[[], Generator[Session, None, None]]:

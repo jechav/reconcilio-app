@@ -10,9 +10,8 @@ import uuid
 from datetime import date
 from decimal import Decimal
 
-from app.chat.agent import ChatDeps, get_chat_deps
+from app.chat.agent import ChatDeps
 from app.chat.model import ContextItem
-from app.main import app
 from app.models import Document, DocumentStatus, DocumentType, Embedding, EmbeddingSourceType, Transaction, TransactionStatus
 
 
@@ -106,9 +105,9 @@ def _vec(seed: float):
     return [seed] * _dim()
 
 
-def _override_chat_deps(vector):
-    app.dependency_overrides[get_chat_deps] = lambda: ChatDeps(
-        embedding_client=FakeEmbeddingClient(vector), chat_model=FakeChatModel()
+def _chat_client(make_client, vector):
+    return make_client(
+        chat_deps=lambda: ChatDeps(embedding_client=FakeEmbeddingClient(vector), chat_model=FakeChatModel())
     )
 
 
@@ -129,7 +128,7 @@ def test_chat_session_and_message_history_round_trip(client, db_session, unique_
     assert messages_resp.json() == []
 
 
-def test_chat_query_spanning_multiple_documents_cites_correct_sources(client, db_session, unique_email):
+def test_chat_query_spanning_multiple_documents_cites_correct_sources(client, make_client, db_session, unique_email):
     owner = _signup(client, unique_email)
     org_id = uuid.UUID(owner["organization"]["id"])
     headers = _auth_headers(owner["access_token"])
@@ -143,16 +142,13 @@ def test_chat_query_spanning_multiple_documents_cites_correct_sources(client, db
     _make_embedding(db_session, org_id, doc2, txn2, "United Airlines flight", vector)
     db_session.commit()
 
-    _override_chat_deps(vector)
-    try:
-        session = client.post("/chat/sessions", headers=headers).json()
-        response = client.post(
-            f"/chat/sessions/{session['id']}/messages",
-            headers=headers,
-            json={"content": "How much did I spend on flights?"},
-        )
-    finally:
-        app.dependency_overrides.pop(get_chat_deps, None)
+    chat_client = _chat_client(make_client, vector)
+    session = chat_client.post("/chat/sessions", headers=headers).json()
+    response = chat_client.post(
+        f"/chat/sessions/{session['id']}/messages",
+        headers=headers,
+        json={"content": "How much did I spend on flights?"},
+    )
 
     assert response.status_code == 200
     messages = response.json()
@@ -174,7 +170,7 @@ def test_chat_query_spanning_multiple_documents_cites_correct_sources(client, db
     assert len(history) == 2
 
 
-def test_chat_session_in_one_org_cannot_surface_another_orgs_data(client, db_session, unique_email):
+def test_chat_session_in_one_org_cannot_surface_another_orgs_data(make_client, client, db_session, unique_email):
     owner_a = _signup(client, unique_email, org_name="Org A")
     org_a_id = uuid.UUID(owner_a["organization"]["id"])
     headers_a = _auth_headers(owner_a["access_token"])
@@ -188,16 +184,13 @@ def test_chat_session_in_one_org_cannot_surface_another_orgs_data(client, db_ses
     _make_embedding(db_session, org_b_id, doc_b, txn_b, "Org B's secret vendor flight", vector)
     db_session.commit()
 
-    _override_chat_deps(vector)
-    try:
-        session = client.post("/chat/sessions", headers=headers_a).json()
-        response = client.post(
-            f"/chat/sessions/{session['id']}/messages",
-            headers=headers_a,
-            json={"content": "How much did I spend on flights?"},
-        )
-    finally:
-        app.dependency_overrides.pop(get_chat_deps, None)
+    chat_client = _chat_client(make_client, vector)
+    session = chat_client.post("/chat/sessions", headers=headers_a).json()
+    response = chat_client.post(
+        f"/chat/sessions/{session['id']}/messages",
+        headers=headers_a,
+        json={"content": "How much did I spend on flights?"},
+    )
 
     assert response.status_code == 200
     messages = response.json()

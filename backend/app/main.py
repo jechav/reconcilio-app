@@ -12,7 +12,20 @@ from app.config import get_settings
 from app.database import SessionLocal, session_provider
 from app.errors import exception_handlers
 from app.logging_config import configure_logging
-from app.routers import auth, health, orgs
+from app.chat.agent import get_chat_deps
+from app.routers import (
+    audit,
+    auth,
+    categories,
+    chat,
+    dashboard,
+    documents,
+    export,
+    health,
+    orgs,
+    reconciliation,
+    transactions,
+)
 
 
 def create_app(
@@ -26,6 +39,9 @@ def create_app(
     dependencies: dict[str, Any] = {
         "db": Provide(session_provider(session_factory)),
         "principal": Provide(provide_principal, sync_to_thread=False),
+        # Declared here, not on the chat Router, so tests can replace it
+        # through `dependency_overrides` (a Router-level key would shadow it).
+        "chat_deps": Provide(get_chat_deps, sync_to_thread=False),
         **(dependency_overrides or {}),
     }
 
@@ -34,6 +50,14 @@ def create_app(
             health.router,
             auth.router,
             orgs.router,
+            documents.router,
+            reconciliation.router,
+            categories.router,
+            transactions.router,
+            dashboard.router,
+            export.router,
+            audit.router,
+            chat.router,
         ],
         dependencies=dependencies,
         middleware=[
