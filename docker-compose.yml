@@ -29,6 +29,9 @@ services:
     # minio/minio is no longer published to Docker Hub; this is a maintained build
     # with the same `minio` entrypoint, `mc`, and server flags.
     image: chainguard/minio:latest
+    # The image defaults to a non-root user, which can't write to a data volume
+    # created as root by the old minio/minio image (or by Docker's default).
+    user: "0:0"
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
