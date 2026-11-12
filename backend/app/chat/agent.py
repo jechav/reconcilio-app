@@ -57,10 +57,10 @@ def default_chat_deps() -> ChatDeps:
 
 
 def get_chat_deps() -> ChatDeps:
-    """FastAPI dependency wrapping `default_chat_deps` -- overridden in tests
-    (`app.dependency_overrides[get_chat_deps] = ...`) the same way `get_db`
-    is, so an API-boundary test can inject a fake chat model/embedding
-    client without ever needing a live OpenRouter key (issue #11)."""
+    """The app-level `chat_deps` dependency, wrapping `default_chat_deps`.
+    Tests replace it with `make_client(chat_deps=...)` (see tests/conftest.py)
+    so an API-boundary test can inject a fake chat model/embedding client
+    without ever needing a live OpenRouter key (issue #11)."""
     return default_chat_deps()
 
 

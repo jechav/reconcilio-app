@@ -4,7 +4,6 @@ version = "0.1.0"
 description = "Reconcilio API and worker"
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
@@ -24,6 +23,7 @@ dependencies = [
     "httpx>=0.27",
     "litellm>=1.99.0",
     "pypdf>=5.1",
+    "litestar>=2.25",
 ]
 
 [dependency-groups]
@@ -35,6 +35,9 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Litestar 3.0 removes implicit path/query/dependency parameters; fail on any
+# use of a deprecated Litestar API so the port stays 3.0-ready.
+filterwarnings = ["error::litestar.exceptions.LitestarDeprecationWarning"]
 
 [[tool.mypy.overrides]]
 module = "celery.*"

@@ -1,39 +1,40 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from litestar import Router, get, patch, post
+from litestar.di import NamedDependency
+from litestar.exceptions import HTTPException
+from litestar.params import JSONBody
+from litestar.status_codes import HTTP_404_NOT_FOUND, HTTP_409_CONFLICT
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.database import get_db
-from app.deps import Principal, get_current_principal, require_role
+from app.auth import Principal, require_role
 from app.llm_usage import usage_summary
 from app.models import OrgMembership, OrgRole, Organization, User
 from app.schemas import InviteRequest, LlmUsageOut, MembershipOut, OrganizationOut, OrgSettingsUpdate
 from app.scoping import org_scoped_select
 
-router = APIRouter(prefix="/orgs/me", tags=["organizations"])
 
-
-@router.patch("/settings", response_model=OrganizationOut)
+@patch("/settings", sync_to_thread=True, guards=[require_role(OrgRole.owner)])
 def update_settings(
-    payload: OrgSettingsUpdate,
-    principal: Principal = Depends(require_role(OrgRole.owner)),
-    db: Session = Depends(get_db),
-) -> Organization:
+    data: JSONBody[OrgSettingsUpdate],
+    principal: NamedDependency[Principal],
+    db: NamedDependency[Session],
+) -> OrganizationOut:
     """Owner-only: set the Organization's extraction confidence threshold
     (issue #3, AC4) -- fields below this are sent through llm_refine."""
     organization = db.get(Organization, principal.org_id)
     if organization is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Organization not found")
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="Organization not found")
 
-    organization.confidence_threshold = payload.confidence_threshold
+    organization.confidence_threshold = data.confidence_threshold
     db.commit()
     db.refresh(organization)
-    return organization
+    return OrganizationOut.model_validate(organization)
 
 
-@router.get("/llm-usage", response_model=list[LlmUsageOut])
+@get("/llm-usage", sync_to_thread=True)
 def get_llm_usage(
-    principal: Principal = Depends(get_current_principal),
-    db: Session = Depends(get_db),
+    principal: NamedDependency[Principal],
+    db: NamedDependency[Session],
 ) -> list[LlmUsageOut]:
     """Per-tenant LLM usage/cost tracking, queryable (issue #7, AC5):
     total calls per provider/model for the calling Organization."""
@@ -43,24 +44,24 @@ def get_llm_usage(
     ]
 
 
-@router.get("/members", response_model=list[MembershipOut])
+@get("/members", sync_to_thread=True)
 def list_members(
-    principal: Principal = Depends(get_current_principal),
-    db: Session = Depends(get_db),
-) -> list[OrgMembership]:
+    principal: NamedDependency[Principal],
+    db: NamedDependency[Session],
+) -> list[MembershipOut]:
     stmt = org_scoped_select(OrgMembership, principal.org_id).order_by(OrgMembership.created_at)
-    return list(db.execute(stmt).scalars())
+    return [MembershipOut.model_validate(membership) for membership in db.execute(stmt).scalars()]
 
 
-@router.post("/members", response_model=MembershipOut, status_code=status.HTTP_201_CREATED)
+@post("/members", sync_to_thread=True, guards=[require_role(OrgRole.owner)])
 def invite_member(
-    payload: InviteRequest,
-    principal: Principal = Depends(require_role(OrgRole.owner)),
-    db: Session = Depends(get_db),
-) -> OrgMembership:
-    user = db.execute(select(User).where(User.email == payload.email)).scalar_one_or_none()
+    data: JSONBody[InviteRequest],
+    principal: NamedDependency[Principal],
+    db: NamedDependency[Session],
+) -> MembershipOut:
+    user = db.execute(select(User).where(User.email == data.email)).scalar_one_or_none()
     if user is None:
-        user = User(email=payload.email, hashed_password=None)
+        user = User(email=data.email, hashed_password=None)
         db.add(user)
         db.flush()
 
@@ -70,10 +71,19 @@ def invite_member(
         .one_or_none()
     )
     if already_member is not None:
-        raise HTTPException(status.HTTP_409_CONFLICT, "User is already a member of this organization")
+        raise HTTPException(
+            status_code=HTTP_409_CONFLICT, detail="User is already a member of this organization"
+        )
 
-    membership = OrgMembership(user_id=user.id, org_id=principal.org_id, role=payload.role)
+    membership = OrgMembership(user_id=user.id, org_id=principal.org_id, role=data.role)
     db.add(membership)
     db.commit()
     db.refresh(membership)
-    return membership
+    return MembershipOut.model_validate(membership)
+
+
+router = Router(
+    path="/orgs/me",
+    route_handlers=[update_settings, get_llm_usage, list_members, invite_member],
+    tags=["organizations"],
+)

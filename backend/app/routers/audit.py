@@ -1,18 +1,16 @@
 import uuid
 from datetime import date, datetime, time, timezone
 
-from fastapi import APIRouter, Depends, Query
+from litestar import Router, get
+from litestar.di import NamedDependency
+from litestar.params import FromQuery
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.database import get_db
-from app.deps import OrgRole, Principal, require_role
-from app.models import SYSTEM_ACTOR, AuditLogEntry, OrgMembership, User
+from app.auth import Principal, require_role
+from app.models import SYSTEM_ACTOR, AuditLogEntry, OrgMembership, OrgRole, User
 from app.schemas import AuditLogEntryOut
 from app.scoping import org_scoped_select
-
-router = APIRouter(prefix="/audit-log", tags=["audit-log"])
-
 
 def _actor_emails(db: Session, org_id: uuid.UUID, actors: set[str]) -> dict[str, str]:
     """Resolve the subset of `actors` that are member User ids of this
@@ -42,15 +40,15 @@ def _actor_emails(db: Session, org_id: uuid.UUID, actors: set[str]) -> dict[str,
     return {str(user_id): email for user_id, email in db.execute(stmt).all()}
 
 
-@router.get("", response_model=list[AuditLogEntryOut])
+@get("/", sync_to_thread=True, guards=[require_role(OrgRole.owner, OrgRole.admin)])
 def list_audit_log(
-    entity_type: str | None = Query(None),
-    actor: str | None = Query(None),
-    action: str | None = Query(None),
-    start_date: date | None = Query(None),
-    end_date: date | None = Query(None),
-    principal: Principal = Depends(require_role(OrgRole.owner, OrgRole.admin)),
-    db: Session = Depends(get_db),
+    principal: NamedDependency[Principal],
+    db: NamedDependency[Session],
+    entity_type: FromQuery[str | None] = None,
+    actor: FromQuery[str | None] = None,
+    action: FromQuery[str | None] = None,
+    start_date: FromQuery[date | None] = None,
+    end_date: FromQuery[date | None] = None,
 ) -> list[AuditLogEntryOut]:
     """Chronological AuditLogEntry list for the calling Organization,
     owner/admin only (issue #10, AC1). Newest first.
@@ -90,3 +88,10 @@ def list_audit_log(
         )
         for entry in entries
     ]
+
+
+router = Router(
+    path="/audit-log",
+    route_handlers=[list_audit_log],
+    tags=["audit-log"],
+)

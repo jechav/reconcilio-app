@@ -4,18 +4,18 @@ import uuid
 from datetime import date
 from enum import Enum
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import Response
+from litestar import Response, Router, get
+from litestar.di import NamedDependency
+from litestar.exceptions import HTTPException
+from litestar.params import FromQuery
+from litestar.status_codes import HTTP_422_UNPROCESSABLE_ENTITY
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.database import get_db
-from app.deps import Principal, get_current_principal
+from app.auth import Principal
 from app.models import Category, ReconciliationMatch, Transaction
 from app.schemas import TransactionExportRow
 from app.scoping import org_scoped_select
-
-router = APIRouter(prefix="/export", tags=["export"])
 
 _CSV_FIELDS = [
     "id",
@@ -99,21 +99,23 @@ def _render_csv(rows: list[TransactionExportRow]) -> str:
     return buffer.getvalue()
 
 
-@router.get("/transactions")
+@get("/transactions", sync_to_thread=True)
 def export_transactions(
-    start_date: date = Query(...),
-    end_date: date = Query(...),
-    format: ExportFormat = Query(...),
-    principal: Principal = Depends(get_current_principal),
-    db: Session = Depends(get_db),
-) -> Response:
+    start_date: FromQuery[date],
+    end_date: FromQuery[date],
+    format: FromQuery[ExportFormat],
+    principal: NamedDependency[Principal],
+    db: NamedDependency[Session],
+) -> Response[bytes]:
     """Export every Transaction in a date range as CSV or JSON, for an
     accountant or tax software (issue #9). Includes Transactions regardless
     of review/match state, with explicit `category`, `review_status`, and
     `match_status` columns so items that still need attention are visible
     rather than silently omitted (AC1-AC3)."""
     if start_date > end_date:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "start_date must not be after end_date")
+        raise HTTPException(
+            status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="start_date must not be after end_date"
+        )
 
     rows = _rows_for_range(db, principal.org_id, start_date, end_date)
     filename = f"transactions_{start_date.isoformat()}_{end_date.isoformat()}.{format.value}"
@@ -126,7 +128,10 @@ def export_transactions(
         media_type = "application/json"
 
     return Response(
-        content=content,
+        content=content.encode("utf-8"),
         media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+router = Router(path="/export", route_handlers=[export_transactions], tags=["export"])

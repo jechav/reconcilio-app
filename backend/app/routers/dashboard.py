@@ -2,22 +2,24 @@ import uuid
 from datetime import date
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from litestar import Router, get
+from litestar.di import NamedDependency
+from litestar.exceptions import HTTPException
+from litestar.params import FromQuery
+from litestar.status_codes import HTTP_422_UNPROCESSABLE_ENTITY
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.database import get_db
-from app.deps import Principal, get_current_principal
+from app.auth import Principal
 from app.models import Category, Document, DocumentType, ReconciliationMatch, Transaction
 from app.schemas import CategorySummaryOut, DashboardFlagsOut, DashboardSummaryOut, TransactionOut
 from app.scoping import org_scoped_select
 
-router = APIRouter(prefix="/dashboard", tags=["dashboard"])
-
-
 def _validate_range(start_date: date, end_date: date) -> None:
     if start_date > end_date:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "start_date must not be after end_date")
+        raise HTTPException(
+            status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="start_date must not be after end_date"
+        )
 
 
 def _bank_transactions_in_range(
@@ -33,12 +35,12 @@ def _bank_transactions_in_range(
     return list(db.execute(stmt).scalars())
 
 
-@router.get("/summary", response_model=DashboardSummaryOut)
+@get("/summary", sync_to_thread=True)
 def get_summary(
-    start_date: date = Query(...),
-    end_date: date = Query(...),
-    principal: Principal = Depends(get_current_principal),
-    db: Session = Depends(get_db),
+    start_date: FromQuery[date],
+    end_date: FromQuery[date],
+    principal: NamedDependency[Principal],
+    db: NamedDependency[Session],
 ) -> DashboardSummaryOut:
     """Income/expense picture grouped by Category for an arbitrary,
     user-selected date range (issue #8, AC1/AC2).
@@ -99,14 +101,14 @@ def get_summary(
     )
 
 
-@router.get("/summary/transactions", response_model=list[TransactionOut])
+@get("/summary/transactions", sync_to_thread=True)
 def get_summary_transactions(
-    start_date: date = Query(...),
-    end_date: date = Query(...),
-    category_id: uuid.UUID | None = Query(None),
-    principal: Principal = Depends(get_current_principal),
-    db: Session = Depends(get_db),
-) -> list[Transaction]:
+    start_date: FromQuery[date],
+    end_date: FromQuery[date],
+    principal: NamedDependency[Principal],
+    db: NamedDependency[Session],
+    category_id: FromQuery[uuid.UUID | None] = None,
+) -> list[TransactionOut]:
     """Drill down from one summary line to its underlying bank Transactions
     (issue #8, AC4). Each carries `document_id` so the caller can fetch the
     source Document. Pass no `category_id` for the "Uncategorized" line."""
@@ -121,15 +123,15 @@ def get_summary_transactions(
         .where(Transaction.category_id == category_id)
         .order_by(Transaction.txn_date)
     )
-    return list(db.execute(stmt).scalars())
+    return [TransactionOut.model_validate(t) for t in db.execute(stmt).scalars()]
 
 
-@router.get("/flags", response_model=DashboardFlagsOut)
+@get("/flags", sync_to_thread=True)
 def get_flags(
-    start_date: date = Query(...),
-    end_date: date = Query(...),
-    principal: Principal = Depends(get_current_principal),
-    db: Session = Depends(get_db),
+    start_date: FromQuery[date],
+    end_date: FromQuery[date],
+    principal: NamedDependency[Principal],
+    db: NamedDependency[Session],
 ) -> DashboardFlagsOut:
     """Missing-documentation flags: Transactions on either side of
     reconciliation that never matched, within the date range (issue #8,
@@ -165,3 +167,10 @@ def get_flags(
             TransactionOut.model_validate(t) for t in _unmatched(DocumentType.invoice_or_receipt)
         ],
     )
+
+
+router = Router(
+    path="/dashboard",
+    route_handlers=[get_summary, get_summary_transactions, get_flags],
+    tags=["dashboard"],
+)
